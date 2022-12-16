@@ -1,0 +1,17 @@
+name: Re_Battlecode22
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - black
+  - flatbuffers
+  - isort
+  - matplotlib
+  - numpy
+  - python
+  - python-flatbuffers
+  - seaborn
+  - tqdm
+  - pip
+  - pip:
+      - ray[tune]
