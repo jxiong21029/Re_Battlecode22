@@ -1,12 +1,2 @@
-from battlecode_env import BattlecodeEnv
-from entities import (
-    Archon,
-    Builder,
-    Building,
-    Entity,
-    Laboratory,
-    Miner,
-    Sage,
-    Soldier,
-    Watchtower,
-)
+from .battlecode_env import *
+from .entities import *
