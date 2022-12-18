@@ -1,14 +1,33 @@
+import math
 from abc import ABC, abstractmethod
+
+import gym
+import numpy as np
+
+from utils import within_radius
+
+DIRECTIONS = [
+    (0, 0),
+    (1, 0),
+    (1, 1),
+    (0, 1),
+    (-1, 1),
+    (-1, 0),
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+]
 
 
 class Entity(ABC):
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
+    def __init__(self, x: int, y: int, team: int):
+        self.x: int = x
+        self.y: int = y
+        self.team: int = team
 
-        self.curr_hp = self.max_hp
-        self.move_cd = 0
-        self.act_cd = 0
+        self.curr_hp: int = self.max_hp
+        self.move_cd: int = 0
+        self.act_cd: int = 0
 
     @property
     @abstractmethod
@@ -55,6 +74,23 @@ class Entity(ABC):
     def sprite(self) -> str:
         pass
 
+    @property
+    def observation_space(self) -> gym.spaces.Box:
+        raise NotImplementedError
+
+    @property
+    def action_space(self) -> gym.spaces.Discrete:
+        raise NotImplementedError
+
+    def distsq(self, other: "Entity"):
+        return (self.x - other.x) ** 2 + (self.y - other.y) ** 2
+
+    def add_move_cost(self, rubble: int):
+        self.move_cd += math.floor(1 + rubble / 10) * self.move_cost
+
+    def add_act_cost(self, rubble: int):
+        self.act_cd += math.floor(1 + rubble / 10) * self.act_cost
+
 
 class Miner(Entity):
     lead_value = 50
@@ -67,8 +103,10 @@ class Miner(Entity):
     vis_rad = 20
     sprite = "m"
 
-    def __init__(self, x, y):
-        super().__init__(x, y)
+    observation_space = gym.spaces.Box(
+        -np.inf, np.inf, shape=(len(within_radius(20)) * 11,)
+    )
+    action_space = gym.spaces.Discrete(9)  # TODO: add leave-1-remaining decision
 
 
 class Builder(Entity):
@@ -82,8 +120,10 @@ class Builder(Entity):
     vis_rad = 20
     sprite = "b"
 
-    def __init__(self, x, y):
-        super().__init__(x, y)
+    observation_space = gym.spaces.Box(
+        -np.inf, np.inf, shape=(len(within_radius(20)) * 7,)
+    )
+    action_space = gym.spaces.Discrete(10)
 
 
 class Soldier(Entity):
@@ -97,8 +137,10 @@ class Soldier(Entity):
     vis_rad = 20
     sprite = "s"
 
-    def __init__(self, x, y):
-        super().__init__(x, y)
+    observation_space = gym.spaces.Box(
+        -np.inf, np.inf, shape=(len(within_radius(20)) * 7,)
+    )
+    action_space = gym.spaces.Discrete(9)
 
 
 class Sage(Entity):
@@ -112,8 +154,10 @@ class Sage(Entity):
     vis_rad = 34
     sprite = "g"
 
-    def __init__(self, x, y):
-        super().__init__(x, y)
+    observation_space = gym.spaces.Box(
+        -np.inf, np.inf, shape=(len(within_radius(34)) * 7,)
+    )
+    action_space = gym.spaces.Discrete(9)
 
 
 class Building(Entity):
@@ -121,9 +165,10 @@ class Building(Entity):
         self,
         x: int,
         y: int,
+        team: int,
         mode: str,
     ):
-        super().__init__(x, y)
+        super().__init__(x, y, team)
         self.mode = mode
         self.level = 1
 
@@ -144,8 +189,11 @@ class Archon(Building):
     vis_rad = 34
     sprite = "A"
 
-    def __init__(self, x, y):
-        super().__init__(x, y, mode="turret")
+    observation_space = gym.spaces.Box(-np.inf, np.inf, shape=(15,))
+    action_space = gym.spaces.Discrete(4)
+
+    def __init__(self, x, y, team):
+        super().__init__(x, y, team, mode="turret")
 
     def level_to(self, level: int):
         assert self.level == 1 and level == 2 or self.level == 2 and level == 3
@@ -174,8 +222,11 @@ class Laboratory(Building):
     vis_rad = 53
     sprite = "L"
 
-    def __init__(self, x, y):
-        super().__init__(x, y, mode="prototype")
+    observation_space = None
+    action_space = gym.spaces.Discrete(2)
+
+    def __init__(self, x, y, team):
+        super().__init__(x, y, team, mode="prototype")
         self.curr_hp = round(0.8 * self.max_hp)
 
     def level_to(self, level: int):
@@ -191,6 +242,16 @@ class Laboratory(Building):
             self.curr_hp += 144
             self.max_hp += 144
 
+    def lead_ratio(self, num_nearby_ally: int):
+        if self.level == 1:
+            k = 0.02
+        elif self.level == 2:
+            k = 0.01
+        else:
+            k = 0.005
+
+        return math.floor(20 - 18 * math.exp(-k * num_nearby_ally))
+
 
 class Watchtower(Building):
     lead_value = 150
@@ -203,6 +264,19 @@ class Watchtower(Building):
     act_rad = 25
     vis_rad = 34
     sprite = "W"
+
+    # ACTIONS
+    # [0, 8] moves (incl. idle)
+    # [9, 89] attacks (can't attack self)
+    # 90 turret mode
+    # 91 portable mode
+    _ATK_MAP = {
+        entry: 9 + i for i, entry in enumerate(within_radius(25)) if entry != (0, 0)
+    }
+
+    def __init__(self, x, y, team):
+        super().__init__(x, y, team, mode="prototype")
+        self.curr_hp = round(0.8 * self.max_hp)
 
     def level_to(self, level: int):
         assert self.level == 1 and level == 2 or self.level == 2 and level == 3
@@ -217,3 +291,6 @@ class Watchtower(Building):
             self.gold_value += 60
             self.curr_hp += 216
             self.max_hp += 216
+
+    def attack_action(self, target_y, target_x) -> int:
+        return self._ATK_MAP[(target_y - self.y, target_x - self.x)]

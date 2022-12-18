@@ -32,12 +32,12 @@ for filename in glob.glob("raw/*.map22"):
     assert game_map.Bodies().TeamIdsLength() == 2 * num_archons_per_team
     for i in range(2 * num_archons_per_team):
         if game_map.Bodies().TeamIds(i) == 1:
-            team1_archon_locs[idx1, 1] = game_map.Bodies().Locs().Xs(i)
             team1_archon_locs[idx1, 0] = game_map.Bodies().Locs().Ys(i)
+            team1_archon_locs[idx1, 1] = game_map.Bodies().Locs().Xs(i)
             idx1 += 1
         else:
-            team2_archon_locs[idx2, 1] = game_map.Bodies().Locs().Xs(i)
             team2_archon_locs[idx2, 0] = game_map.Bodies().Locs().Ys(i)
+            team2_archon_locs[idx2, 1] = game_map.Bodies().Locs().Xs(i)
             idx2 += 1
 
     # NOTE: dim 0 is the y-axis, dim 1 is the x-axis
