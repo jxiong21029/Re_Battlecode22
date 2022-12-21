@@ -1,5 +1,4 @@
 import glob
-import random
 import typing
 from collections import defaultdict
 
@@ -21,7 +20,7 @@ class BattlecodeEnv:
         self.reward_shaping_depends_hp = reward_shaping_depends_hp
         self.seed = seed
 
-        random.seed(seed)
+        self.rng = np.random.default_rng(seed)
         self.map_selection = self.map_selection
 
         self.rubble = None
@@ -41,9 +40,9 @@ class BattlecodeEnv:
         return 0 <= y < self.rubble.shape[0] and 0 <= x < self.rubble.shape[1]
 
     def reset(self):
-        filenames = glob.glob("maps/data/*.npz")
+        filenames = glob.glob("Re_Battlecode22/maps/data/*.npz")
         data = np.load(
-            random.choice(filenames)
+            self.rng.choice(filenames)
             if self.map_selection is None
             else f"maps/data/{self.map_selection}.npz"
         )
@@ -99,7 +98,7 @@ class BattlecodeEnv:
             ):
                 yield yld
 
-    def observe(self, bot):
+    def observe(self, bot, symmetry=0):  # 4 rotations * 2 reflections * 2 team swaps
         if isinstance(bot, Archon):
             counts = defaultdict(int)
             for unit in self.units:
@@ -226,7 +225,7 @@ class BattlecodeEnv:
                 ret[27 + unit.team] = unit.act_cd
         return ret
 
-    def legal_action_mask(self, bot):
+    def legal_action_mask(self, bot, symmetry=0):
         ret = np.zeros(bot.action_space.n, dtype=bool)
 
         ret[0] = True
@@ -363,7 +362,11 @@ class BattlecodeEnv:
 
             assert not isinstance(bot, Watchtower)  # TODO
 
-            yield bot, self.observe(bot), self.legal_action_mask(bot)
+            symmetry = self.rng.integers(16) if self.augment_obs else 0
+            yield bot, self.observe(bot, symmetry), self.legal_action_mask(
+                bot, symmetry
+            )
+
             self.curr_idx += 1
         self.curr_idx = None
 
@@ -385,10 +388,11 @@ class BattlecodeEnv:
             available_lead = [
                 pos
                 for (dy, dx) in within_radius(bot.act_rad, prev_move=action)
-                if (self.lead[pos := (bot.y + dy, bot.x + dx)]) > 0
+                if self.in_bounds(bot.y + dy, bot.x + dx)
+                and (self.lead[pos := (bot.y + dy, bot.x + dx)]) > 0
             ]
             while available_lead and bot.act_cd < 10:
-                selected = random.choice(available_lead)
+                selected = tuple(self.rng.choice(available_lead))
                 self.lead[selected] -= 1
                 self.lead_banks[bot.team] += 1
                 if self.lead[selected] == 0:
@@ -405,7 +409,7 @@ class BattlecodeEnv:
             )
             targets = [target for target in targets if target.curr_hp < target.max_hp]
             if targets:
-                selected = random.choice(targets)
+                selected = self.rng.choice(targets)
                 self.process_attack(bot, selected)
 
         # lab construction
@@ -417,7 +421,7 @@ class BattlecodeEnv:
                 if (bot.y + dy, bot.x + dx) not in self.pos_map
             ]
             assert len(available_pos) > 0
-            chosen_pos = random.choice(available_pos)
+            chosen_pos = tuple(self.rng.choice(available_pos))
             self.create_unit(Laboratory, chosen_pos, bot.team)
             bot.add_act_cost(self.rubble[bot.y, bot.x])
 
@@ -434,7 +438,7 @@ class BattlecodeEnv:
                     return -num_shots, enemy.curr_hp, -bot.distsq(enemy)
 
                 best_score = max(score(enemy) for enemy in nearby_enemies)
-                chosen_enemy = random.choice(
+                chosen_enemy = self.rng.choice(
                     [enemy for enemy in nearby_enemies if score(enemy) == best_score]
                 )
                 self.process_attack(bot, chosen_enemy)
@@ -452,8 +456,8 @@ class BattlecodeEnv:
                 if abs(pos[0] - map_center[0]) + abs(pos[1] - map_center[1])
                 < abs(bot.y - map_center[0]) + abs(bot.x - map_center[1])
             ]
-            chosen_pos = random.choice(
-                good_spawn_pos if good_spawn_pos else all_spawn_pos
+            chosen_pos = tuple(
+                self.rng.choice(good_spawn_pos if good_spawn_pos else all_spawn_pos)
             )
 
             unit_class_map = {

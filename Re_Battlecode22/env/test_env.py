@@ -1,6 +1,8 @@
 import numpy as np
 import pytest
 
+from Re_Battlecode22.utils import pos_symmetry_trsfm
+
 from .battlecode_env import BattlecodeEnv
 
 SEED = 69420
@@ -24,9 +26,29 @@ def sample_envs():
     ret = [BattlecodeEnv(seed=rng.integers(2**32))]
     ret[0].reset()
 
-    for num_rounds in (1, 5, 5, 5, 100):
+    for num_rounds in (1, 5, 5, 5, 100, 100):
         ret.append(make_sample_env(num_rounds, seed=rng.integers(2**32)))
     return ret
+
+
+def test_symmetries():
+    starty, startx = 2, 3
+    expected_results = {
+        (2, 3),
+        (3, 2),
+        (1, 3),
+        (3, 1),
+        (2, 0),
+        (0, 2),
+        (1, 0),
+        (0, 1),
+    }
+    actual_results = set()
+    for symmetry in range(8):
+        result = pos_symmetry_trsfm(starty, startx, symmetry, 4, 4)
+        actual_results.add(result)
+        assert result == pos_symmetry_trsfm(starty, startx, symmetry + 8, 4, 4)
+    assert expected_results == actual_results
 
 
 def test_pos_map(sample_envs: list[BattlecodeEnv]):

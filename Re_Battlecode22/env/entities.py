@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 import gym
 import numpy as np
 
-from utils import within_radius
+from Re_Battlecode22.utils import within_radius
 
 DIRECTIONS = [
     (0, 0),
