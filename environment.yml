@@ -9,6 +9,7 @@ dependencies:
   - isort
   - matplotlib
   - numpy
+  - pytest
   - python
   - python-flatbuffers
   - pytorch

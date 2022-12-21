@@ -110,8 +110,8 @@ class Miner(Entity):
 
 
 class Builder(Entity):
-    lead_value: 40
-    gold_value: 0
+    lead_value = 40
+    gold_value = 0
     max_hp = 30
     dmg = -2
     move_cost = 20
