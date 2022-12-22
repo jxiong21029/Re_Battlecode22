@@ -2,6 +2,7 @@ import glob
 import typing
 from collections import defaultdict
 
+from ..utils import *
 from .entities import *
 
 
@@ -39,16 +40,32 @@ class BattlecodeEnv:
     def in_bounds(self, y, x):
         return 0 <= y < self.rubble.shape[0] and 0 <= x < self.rubble.shape[1]
 
+    def pos_symmetry(self, y, x, symmetry=0):
+        return symmetry_transform(
+            y,
+            x,
+            symmetry,
+            map_height=self.rubble.shape[0],
+            map_width=self.rubble.shape[1],
+        )
+
+    def nearby_bots(self, y, x, radsq, team=None, prev_move: int = 0):
+        for (dy, dx) in within_radius(radsq, prev_move=prev_move):
+            if (y + dy, x + dx) in self.pos_map and (
+                (yld := self.pos_map[(y + dy, x + dx)]).team == team or team is None
+            ):
+                yield yld
+
     def reset(self):
         filenames = glob.glob("Re_Battlecode22/maps/data/*.npz")
         data = np.load(
             self.rng.choice(filenames)
             if self.map_selection is None
-            else f"maps/data/{self.map_selection}.npz"
+            else f"Re_Battlecode22/maps/data/{self.map_selection}.npz"
         )
 
-        self.rubble = data["rubble"]
-        self.lead = data["lead"]
+        self.rubble = data["rubble"].astype(np.int8)
+        self.lead = data["lead"].astype(np.int8)
         self.gold = np.zeros_like(self.lead)
 
         self.t = 0
@@ -91,14 +108,8 @@ class BattlecodeEnv:
     # - archon: Discrete(4) [repair / idle, spawn miner, spawn builder, spawn combat]
     # - lab: auto-converts lead to gold
 
-    def nearby_bots(self, y, x, radsq, team=None, prev_move: int = 0):
-        for (dy, dx) in within_radius(radsq, prev_move=prev_move):
-            if (y + dy, x + dx) in self.pos_map and (
-                (yld := self.pos_map[(y + dy, x + dx)]).team == team or team is None
-            ):
-                yield yld
-
     def observe(self, bot, symmetry=0):  # 4 rotations * 2 reflections * 2 team swaps
+        # team swap has no effect on observe() due to locality
         if isinstance(bot, Archon):
             counts = defaultdict(int)
             for unit in self.units:
@@ -114,20 +125,16 @@ class BattlecodeEnv:
                     "archon",
                 )
 
-            # TODO observation normalization
+            yy, xx = self.pos_symmetry(bot.y, bot.x, symmetry)
             return np.array(
                 [
-                    (bot.y - self.rubble.shape[0] / 2 + 0.5) / 30,
-                    (bot.x - self.rubble.shape[1] / 2 + 0.5) / 30,
-                    self.rubble.shape[0] / 60,
-                    self.rubble.shape[1] / 60,
+                    (yy - self.rubble.shape[0] / 2 + 0.5) / 30,
+                    (xx - self.rubble.shape[1] / 2 + 0.5) / 30,
+                    self.rubble.shape[0 if symmetry % 8 >= 4 else 1] / 60,
+                    self.rubble.shape[1 if symmetry % 8 >= 4 else 0] / 60,
                     self.t / 2000,
-                    np.log1p(self.t) / np.log1p(2000),
-                    np.log1p(2000 - self.t) / np.log1p(2000),
                     self.lead_banks[bot.team] / 256,
-                    np.log1p(self.lead_banks[bot.team]) / np.log1p(256),
                     self.gold_banks[bot.team] / 64,
-                    np.log1p(self.gold_banks[bot.team]) / np.log1p(64),
                     counts["miner"] / 32,
                     counts["builder"] / 32,
                     counts["soldier"] / 32,
@@ -139,9 +146,10 @@ class BattlecodeEnv:
             raise NotImplementedError
         else:
             assert isinstance(bot, (Miner, Builder, Soldier, Sage))
-            ret = [bot.x, bot.y, bot.curr_hp, bot.move_cd, bot.act_cd]
+            by, bx = self.pos_symmetry(bot.y, bot.x, symmetry)
+            ret = [by, bx, bot.curr_hp, bot.move_cd, bot.act_cd]
 
-            for dy, dx in within_radius(bot.vis_rad):
+            for dy, dx in within_radius(bot.vis_rad, symmetry=symmetry):
                 y, x = bot.y + dy, bot.x + dx
                 other: Entity = self.pos_map[(y, x)] if (y, x) in self.pos_map else None
                 is_ally = other is not None and other.team == bot.team
@@ -151,10 +159,8 @@ class BattlecodeEnv:
                     [
                         self.rubble[y, x] / 100 if self.in_bounds(y, x) else 0,
                         other.curr_hp / 512 if is_ally else 0,
-                        np.log1p(other.curr_hp) / np.log1p(512) if is_ally else 0,
                         is_building if is_ally else 0,
                         other.curr_hp / 512 if is_enemy else 0,
-                        np.log1p(other.curr_hp) / np.log1p(512) if is_enemy else 0,
                         is_building if is_enemy else 0,
                     ]
                 )
@@ -162,49 +168,60 @@ class BattlecodeEnv:
                     ret.extend(
                         [
                             self.lead[y, x] / 128 if self.in_bounds(y, x) else 0,
-                            np.log1p(self.lead[y, x]) / np.log1p(128)
-                            if self.in_bounds(y, x)
-                            else 0,
                             self.gold[y, x] / 32 if self.in_bounds(y, x) else 0,
-                            np.log1p(self.gold[y, x]) / np.log1p(32)
-                            if self.in_bounds(y, x)
-                            else 0,
                         ]
                     )
             return np.array(ret, dtype=np.float32)
 
-    # TODO augmentations: map flips, rotations. team swap should negate q-value.
-    def global_observation(self):
-        # timestep, lead bank, gold bank for both teams, map size, x, y coordinate (8)
-        # rubble, lead, gold (3)
-        # ally HP, type one-hot, move_cd, act_cd (1 + 6 + 2 = 9)
+    def global_observation(self, symmetry=0):
+        # timestep, lead bank, gold bank for both teams, map size, x, y coordinate (9)
+        # rubble, lead, gold  (3)
+        # ally type one-hot, HP, move_cd, act_cd (6 + 3 = 9)
         # same for opponent (9)
-        # NUM CHANNELS: 8 + 3 + 9 + 9 = 29
+        # SUM: 9 + 3 + 9 + 9 = 30
 
+        swapax = int(symmetry % 8 >= 4)
         ret = np.zeros(
-            (29, self.rubble.shape[0], self.rubble.shape[1]), dtype=np.float32
+            (30, self.rubble.shape[0], self.rubble.shape[1]),
+            dtype=np.float32,
         )
 
-        # global information: copied into every x,y coordinate
-        # timestep, lead+gold banks, map size. also includes each cell's x, y coordinate
+        # global information:
+        # timestep, lead+gold banks, map size.
         ret[0] = self.t / 2000
-        ret[1:3] = np.array(self.lead_banks).reshape((-1, 1, 1)) / 256
-        ret[3:5] = np.array(self.gold_banks).reshape((-1, 1, 1)) / 64
-        ret[5:7] = np.array(self.rubble.shape).reshape((-1, 1, 1)) / 60
-        ret[8] = (
+        ret[1:3] = (
+            np.array(
+                self.lead_banks if symmetry < 8 else self.lead_banks[::-1]
+            ).reshape((-1, 1, 1))
+            / 256
+        )
+        ret[3:5] = (
+            np.array(
+                self.gold_banks if symmetry < 8 else self.gold_banks[::-1]
+            ).reshape((-1, 1, 1))
+            / 64
+        )
+        ret[5:7] = (
+            np.array(
+                self.rubble.shape if not swapax else self.rubble.shape[::-1]
+            ).reshape((-1, 1, 1))
+            / 60
+        )
+
+        # each cell stores own y and x position relative to origin
+        ret[7 + swapax] = (
             np.arange(self.rubble.shape[0]) - self.rubble.shape[0] / 2 + 0.5
         ).reshape((-1, 1)) / 30
-        ret[9] = (
+        ret[8 - swapax] = (
             np.arange(self.rubble.shape[1]) - self.rubble.shape[1] / 2 + 0.5
         ).reshape((1, -1)) / 30
 
         # terrain: rubble, lead, gold
-        ret[10] = self.rubble / 100
-        ret[11] = self.lead / 128
-        ret[12] = self.gold / 32
+        ret[9] = self.rubble / 100
+        ret[10] = self.lead / 128
+        ret[11] = self.gold / 32
 
-        # units: ally HP, type one-hot, move_cd, act_cd, x2 for opp
-
+        # units: ally HP, type one-hot, move_cd, act_cd
         unit_type_map = {
             Miner: 0,
             Builder: 1,
@@ -219,19 +236,20 @@ class BattlecodeEnv:
                     continue
                 unit: Entity = self.pos_map[(y, x)]
                 unit_type_id = unit_type_map[unit.__class__]
-                ret[13 + 2 * unit_type_id + unit.team] = 1
+                ut = unit.team if symmetry < 8 else 1 - unit.team
+                ret[12 + 2 * unit_type_id + ut, y, x] = 1
+                ret[24 + ut, y, x] = unit.curr_hp / 512
+                ret[26 + ut, y, x] = unit.move_cd / 100
+                ret[28 + ut, y, x] = unit.act_cd / 100
+        return global_symmetry_transform(ret, symmetry)
 
-                ret[25 + unit.team] = unit.move_cd
-                ret[27 + unit.team] = unit.act_cd
-        return ret
-
-    def legal_action_mask(self, bot, symmetry=0):
+    def legal_action_mask(self, bot, obs_symmetry=0):
         ret = np.zeros(bot.action_space.n, dtype=bool)
 
         ret[0] = True
         if not isinstance(bot, Building):
             # move actions: [0, 8] inclusive for all bots
-            for i, (dy, dx) in enumerate(DIRECTIONS):
+            for i, (dy, dx) in enumerate(DIRECTIONS):  # TODO action mask symmetry
                 if i == 0:
                     continue
                 elif (
@@ -379,7 +397,7 @@ class BattlecodeEnv:
             if self.t % 20 == 0:
                 self.rubble[self.rubble > 0] += 5
 
-    def step(self, bot, action):
+    def step(self, bot, action, obs_symmetry=0):
         if not isinstance(bot, Building) and 1 <= action <= 8:
             self.process_move(bot, action)
 

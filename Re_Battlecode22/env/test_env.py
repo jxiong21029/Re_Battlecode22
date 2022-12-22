@@ -1,7 +1,9 @@
+import copy
+
 import numpy as np
 import pytest
 
-from Re_Battlecode22.utils import pos_symmetry_trsfm
+from Re_Battlecode22.utils import symmetry_transform
 
 from .battlecode_env import BattlecodeEnv
 
@@ -31,7 +33,7 @@ def sample_envs():
     return ret
 
 
-def test_symmetries():
+def test_symmetry_transform():
     starty, startx = 2, 3
     expected_results = {
         (2, 3),
@@ -45,10 +47,64 @@ def test_symmetries():
     }
     actual_results = set()
     for symmetry in range(8):
-        result = pos_symmetry_trsfm(starty, startx, symmetry, 4, 4)
+        result = symmetry_transform(starty, startx, symmetry, 4, 4)
         actual_results.add(result)
-        assert result == pos_symmetry_trsfm(starty, startx, symmetry + 8, 4, 4)
+        assert result == symmetry_transform(starty, startx, symmetry + 8, 4, 4)
     assert expected_results == actual_results
+
+
+def test_global_symmetry_yflip(sample_envs):
+    for env in sample_envs:
+        env: BattlecodeEnv
+        yflip = copy.deepcopy(env)
+
+        yflip.rubble = yflip.rubble[::-1]
+        yflip.lead = yflip.lead[::-1]
+        yflip.gold = yflip.gold[::-1]
+        for unit in yflip.units:
+            unit.y = yflip.rubble.shape[0] - unit.y - 1
+        yflip.pos_map = {(unit.y, unit.x): unit for unit in yflip.units}
+
+        orig = env.global_observation(symmetry=1)
+        copied = yflip.global_observation(symmetry=0)
+        for i in range(orig.shape[0]):
+            if i == 7:
+                continue
+            assert np.isclose(orig[i], copied[i]).all(), str(i)
+
+
+def test_global_symmetry_tranpose(sample_envs):
+    for env in sample_envs:
+        env: BattlecodeEnv
+        tranposed = copy.deepcopy(env)
+
+        tranposed.rubble = tranposed.rubble.transpose()
+        tranposed.lead = tranposed.lead.transpose()
+        tranposed.gold = tranposed.gold.transpose()
+        for unit in tranposed.units:
+            unit.x, unit.y = unit.y, unit.x
+        tranposed.pos_map = {(unit.y, unit.x): unit for unit in tranposed.units}
+
+        orig = env.global_observation(symmetry=4)
+        copied = tranposed.global_observation(symmetry=0)
+        for i in range(orig.shape[0]):
+            assert np.isclose(orig[i], copied[i]).all(), str(i)
+
+
+def test_global_symmetry_teamflip(sample_envs):
+    for env in sample_envs:
+        env: BattlecodeEnv
+        teamflip = copy.deepcopy(env)
+
+        for unit in teamflip.units:
+            unit.team = 1 - unit.team
+        teamflip.lead_banks = teamflip.lead_banks[::-1]
+        teamflip.gold_banks = teamflip.gold_banks[::-1]
+
+        orig = env.global_observation(symmetry=8)
+        copied = teamflip.global_observation(symmetry=0)
+        for i in range(orig.shape[0]):
+            assert np.isclose(orig[i], copied[i]).all(), str(i)
 
 
 def test_pos_map(sample_envs: list[BattlecodeEnv]):

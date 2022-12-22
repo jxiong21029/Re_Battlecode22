@@ -104,7 +104,7 @@ class Miner(Entity):
     sprite = "m"
 
     observation_space = gym.spaces.Box(
-        -np.inf, np.inf, shape=(len(within_radius(20)) * 11,)
+        -np.inf, np.inf, shape=(5 + len(within_radius(20)) * 7,)
     )
     action_space = gym.spaces.Discrete(9)  # TODO: add leave-1-remaining decision
 
@@ -121,7 +121,7 @@ class Builder(Entity):
     sprite = "b"
 
     observation_space = gym.spaces.Box(
-        -np.inf, np.inf, shape=(len(within_radius(20)) * 7,)
+        -np.inf, np.inf, shape=(5 + len(within_radius(20)) * 5,)
     )
     action_space = gym.spaces.Discrete(10)
 
@@ -138,7 +138,7 @@ class Soldier(Entity):
     sprite = "s"
 
     observation_space = gym.spaces.Box(
-        -np.inf, np.inf, shape=(len(within_radius(20)) * 7,)
+        -np.inf, np.inf, shape=(5 + len(within_radius(20)) * 5,)
     )
     action_space = gym.spaces.Discrete(9)
 
@@ -155,7 +155,7 @@ class Sage(Entity):
     sprite = "g"
 
     observation_space = gym.spaces.Box(
-        -np.inf, np.inf, shape=(len(within_radius(34)) * 7,)
+        -np.inf, np.inf, shape=(5 + len(within_radius(34)) * 5,)
     )
     action_space = gym.spaces.Discrete(9)
 
@@ -189,7 +189,7 @@ class Archon(Building):
     vis_rad = 34
     sprite = "A"
 
-    observation_space = gym.spaces.Box(-np.inf, np.inf, shape=(15,))
+    observation_space = gym.spaces.Box(-np.inf, np.inf, shape=(11,))
     action_space = gym.spaces.Discrete(4)
 
     def __init__(self, x, y, team):

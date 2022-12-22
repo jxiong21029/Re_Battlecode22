@@ -1,3 +1,4 @@
 *.pyc
+.DS_Store
 .idea
 Re_Battlecode22/maps/battlecode/
