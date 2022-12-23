@@ -3,8 +3,7 @@ import copy
 import numpy as np
 import pytest
 
-from Re_Battlecode22.utils import symmetry_transform
-
+from ..utils import symmetry_transform
 from .battlecode_env import BattlecodeEnv
 
 SEED = 69420

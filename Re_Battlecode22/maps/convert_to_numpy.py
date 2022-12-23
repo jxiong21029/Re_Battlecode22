@@ -4,16 +4,16 @@ import os
 import numpy as np
 from battlecode.schema.GameMap import GameMap
 
-dirname = "data"
+dirname = "Re_Battlecode22/maps/data"
 if os.path.isdir(dirname):
     for filename in os.listdir(dirname):
         file_path = os.path.join(dirname, filename)
         if os.path.isfile(file_path) or os.path.islink(file_path):
             os.unlink(file_path)
 
-for filename in glob.glob("raw/*.map22"):
+for filename in glob.glob("Re_Battlecode22/maps/raw/*.map22"):
     name = filename[4:-6]
-    print(f"Starting map {name}")
+    # print(f"Starting map {name}")
     with open(filename, "rb") as f:
         buf = bytearray(f.read())
     game_map = GameMap.GetRootAsGameMap(buf, 0)
@@ -34,10 +34,18 @@ for filename in glob.glob("raw/*.map22"):
         if game_map.Bodies().TeamIds(i) == 1:
             team1_archon_locs[idx1, 0] = game_map.Bodies().Locs().Ys(i)
             team1_archon_locs[idx1, 1] = game_map.Bodies().Locs().Xs(i)
+
+            assert 0 <= team1_archon_locs[idx1, 0] < rubble.shape[0]
+            assert 0 <= team1_archon_locs[idx1, 1] < rubble.shape[1]
+
             idx1 += 1
         else:
             team2_archon_locs[idx2, 0] = game_map.Bodies().Locs().Ys(i)
             team2_archon_locs[idx2, 1] = game_map.Bodies().Locs().Xs(i)
+
+            assert 0 <= team2_archon_locs[idx2, 0] < rubble.shape[0]
+            assert 0 <= team2_archon_locs[idx2, 1] < rubble.shape[1]
+
             idx2 += 1
 
     # NOTE: dim 0 is the y-axis, dim 1 is the x-axis

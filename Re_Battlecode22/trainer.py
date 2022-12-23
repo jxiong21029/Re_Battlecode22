@@ -1,12 +1,14 @@
 import copy
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import tqdm
 
-from .env import BattlecodeEnv
-from .env.entities import *
+from .env import Archon, BattlecodeEnv, Builder, Miner, Sage, Soldier
+from .utils import Logger
 
 
 @dataclass
@@ -45,7 +47,7 @@ class Model(nn.Module):
         )
         self.squeeze_and_excite = nn.Sequential(
             nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
+            nn.Flatten(start_dim=0),  # no batching
             nn.Linear(16, 64),
             nn.ReLU(),
             nn.Linear(64, 16),
@@ -69,6 +71,7 @@ class Model(nn.Module):
                     action_qs = self.utility_nets[bot.__class__.__name__](
                         torch.tensor(obs)
                     )
+                    action_qs[~action_mask] = -1e8
                     action = torch.argmax(action_qs).item()
                 actions.append(action)
                 env.step(bot, action)
@@ -78,9 +81,10 @@ class Model(nn.Module):
     def forward(
         self, env_state: BattlecodeEnv, actions: list[int]
     ) -> tuple[torch.Tensor, BattlecodeEnv]:
-        x = self.conv1(env_state.global_observation())
-        x = self.squeeze_and_excite(x)[:, :, None, None] * x
+        x = self.conv1(torch.tensor(env_state.global_observation()))
+        x = self.squeeze_and_excite(x)[:, None, None] * x
         weights = F.softplus(self.head(x).squeeze(0))  # (1, H, W), then (H, W)
+        assert weights.shape == env_state.rubble.shape
 
         global_q = torch.tensor(0.0)
         curr_env = copy.deepcopy(env_state)
@@ -109,12 +113,20 @@ class Trainer:
         epsilon_decrease_steps=64_000,
         epsilon_max=1,
         epsilon_min=0.01,
+        logging_interval=1000,
+        verbose=False,
         seed=None,
     ):
         assert pre_learning_steps + epsilon_decrease_steps <= buffer_size
 
         self.rng = np.random.default_rng(seed)
+        self.logging_interval = logging_interval
+        self.logger = Logger()
+        self.verbose = verbose
+
         self.env = env
+        self.env.logger = self.logger
+        self.env.reset()
         self.discount_factor = discount_factor
 
         self.buffer_size = buffer_size
@@ -153,29 +165,31 @@ class Trainer:
             self.replay_buffer[self.t % self.buffer_size] = new_transition
 
     def learn(self, num_steps):
-        for i in range(num_steps):
+        iterator = tqdm.trange(num_steps) if self.verbose else range(num_steps)
+        for _ in iterator:
             curr_state = copy.deepcopy(self.env)
             actions, reward = self.model.explore_step(self.env, self.curr_epsilon())
             self.store(curr_state, actions, reward)
+            if self.env.done:
+                self.env.reset()
 
             if (
-                self.t > self.pre_learning_steps
+                self.t >= self.pre_learning_steps
                 and (self.t - self.pre_learning_steps + 1) % self.steps_per_update == 0
             ):
                 loss = torch.tensor(0.0)
                 for _ in range(self.minibatch_size):
                     transition = self.rng.choice(self.replay_buffer)
-                    y, next_state = self.model.forward(
-                        transition.env_state, transition.actions
-                    )
+                    y, next_state = self.model(transition.env_state, transition.actions)
 
-                    next_actions, _ = self.model.explore_step(
-                        copy.deepcopy(next_state), epsilon=0
-                    )
-                    next_q, _ = self.target_model.forward(
-                        next_state, actions=next_actions
-                    )
-                    target = transition.reward + self.discount_factor * next_q
+                    if next_state.done:
+                        target = transition.reward
+                    else:
+                        next_actions, _ = self.model.explore_step(
+                            copy.deepcopy(next_state), epsilon=0
+                        )
+                        next_q, _ = self.target_model(next_state, actions=next_actions)
+                        target = transition.reward + self.discount_factor * next_q
 
                     loss += ((y - target) ** 2) / self.minibatch_size
 
@@ -184,7 +198,7 @@ class Trainer:
                 self.optim.step()
 
             if (
-                self.t > self.pre_learning_steps
+                self.t >= self.pre_learning_steps
                 and (self.t - self.pre_learning_steps + 1) % self.target_update_period
                 == 0
             ):
@@ -193,5 +207,15 @@ class Trainer:
                         self.model.parameters(), self.target_model.parameters()
                     ):
                         p2[:] = self.tau * p1 + (1 - self.tau) * p2
+
+            if (
+                self.t < self.pre_learning_steps
+                and (self.t + 1) % self.logging_interval == 0
+            ) or (
+                self.t >= self.pre_learning_steps
+                and (self.t - self.pre_learning_steps + 1) % self.logging_interval == 0
+            ):
+                self.logger.step()
+                self.logger.generate_plots()
 
             self.t += 1

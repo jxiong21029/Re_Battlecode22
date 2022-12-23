@@ -1,9 +1,28 @@
 import glob
+import os
 import typing
 from collections import defaultdict
 
-from ..utils import *
-from .entities import *
+import numpy as np
+
+from ..utils import (
+    DIRECTIONS,
+    Logger,
+    global_symmetry_transform,
+    symmetry_transform,
+    within_radius,
+)
+from .entities import (
+    Archon,
+    Builder,
+    Building,
+    Entity,
+    Laboratory,
+    Miner,
+    Sage,
+    Soldier,
+    Watchtower,
+)
 
 
 class BattlecodeEnv:
@@ -13,16 +32,17 @@ class BattlecodeEnv:
         augment_obs: bool = False,  # TODO
         gold_reward_shaping_factor: float = 5.0,
         reward_shaping_depends_hp: bool = True,
+        logger=None,
         seed: int | None = None,
     ):
         self.map_selection = map_selection
+        self.map_name = None
         self.augment_obs = augment_obs
         self.gold_reward_shaping_factor = gold_reward_shaping_factor
         self.reward_shaping_depends_hp = reward_shaping_depends_hp
-        self.seed = seed
-
         self.rng = np.random.default_rng(seed)
-        self.map_selection = self.map_selection
+        self.logger = Logger() if logger is None else logger
+        self.seed = seed
 
         self.rubble = None
         self.lead = None
@@ -36,6 +56,8 @@ class BattlecodeEnv:
         self.done = None
         self.curr_idx = None
         self.prev_value_differential = None
+
+        self.round_metrics = None
 
     def in_bounds(self, y, x):
         return 0 <= y < self.rubble.shape[0] and 0 <= x < self.rubble.shape[1]
@@ -58,11 +80,13 @@ class BattlecodeEnv:
 
     def reset(self):
         filenames = glob.glob("Re_Battlecode22/maps/data/*.npz")
-        data = np.load(
+        selected_file = (
             self.rng.choice(filenames)
             if self.map_selection is None
             else f"Re_Battlecode22/maps/data/{self.map_selection}.npz"
         )
+        data = np.load(selected_file)
+        self.map_name = os.path.splitext(os.path.basename(selected_file))[0]
 
         self.rubble = data["rubble"].astype(np.uint8)
         self.lead = data["lead"].astype(np.uint8)
@@ -74,8 +98,8 @@ class BattlecodeEnv:
         self.units = []
         self.pos_map = {}
         for row0, row1 in zip(data["team0_archon_pos"], data["team1_archon_pos"]):
-            self.units.append(Archon(y=row0[1], x=row0[0], team=0))
-            self.units.append(Archon(y=row1[1], x=row1[0], team=1))
+            self.units.append(Archon(y=row0[0], x=row0[1], team=0))
+            self.units.append(Archon(y=row1[0], x=row1[1], team=1))
         for unit in self.units:
             self.pos_map[(unit.y, unit.x)] = unit
         self.archon_counts = [len(self.units) // 2, len(self.units) // 2]
@@ -254,8 +278,7 @@ class BattlecodeEnv:
                     continue
                 elif (
                     bot.move_cd < 10
-                    and 0 <= bot.y + dy < self.rubble.shape[0]
-                    and 1 <= bot.x + dx < self.rubble.shape[1]
+                    and self.in_bounds(bot.y + dy, bot.x + dx)
                     and (bot.y + dy, bot.x + dx) not in self.pos_map
                 ):
                     ret[i] = True
@@ -263,8 +286,7 @@ class BattlecodeEnv:
         adj_available = False
         for dy, dx in DIRECTIONS[1:]:
             if (
-                0 <= bot.y + dy < self.rubble.shape[0]
-                and 1 <= bot.x + dx < self.rubble.shape[1]
+                self.in_bounds(bot.y + dy, bot.x + dx)
                 and (bot.y + dy, bot.x + dx) not in self.pos_map
             ):
                 adj_available = True
@@ -313,6 +335,7 @@ class BattlecodeEnv:
         assert bot.move_cd < 10
         dy, dx = DIRECTIONS[action]
         assert (bot.y + dy, bot.x + dx) not in self.pos_map
+        assert self.in_bounds(bot.y + dy, bot.x + dx)
         del self.pos_map[(bot.y, bot.x)]
         bot.y += dy
         bot.x += dx
@@ -336,6 +359,7 @@ class BattlecodeEnv:
         target.curr_hp = min(target.curr_hp - bot.dmg, target.max_hp)
         dmg_dealt = old_hp - max(target.curr_hp, 0)
         killed = target.curr_hp <= 0
+        self.round_metrics["dmg_dealt"] += dmg_dealt
         if killed:
             if isinstance(target, Archon):
                 self.archon_counts[target.team] -= 1
@@ -349,10 +373,13 @@ class BattlecodeEnv:
             if idx <= self.curr_idx:
                 self.curr_idx -= 1
 
+            self.round_metrics["units_killed"] += 1
+
         return dmg_dealt, killed
 
     def create_unit(self, unit_class, pos, team):
         assert pos not in self.pos_map
+        assert self.in_bounds(pos[0], pos[1])
         assert isinstance(pos, tuple)
 
         new_unit = unit_class(y=pos[0], x=pos[1], team=team)
@@ -369,6 +396,16 @@ class BattlecodeEnv:
         """Yields Entity objects, observations, and action masks"""
         assert self.curr_idx is None
         assert self.t < 2000
+
+        self.round_metrics = {
+            "spawned_miner": 0,
+            "spawned_builder": 0,
+            "spawned_soldier": 0,
+            "spawned_sage": 0,
+            "lead_mined": 0,
+            "dmg_dealt": 0,
+            "units_killed": 0,
+        }
 
         self.curr_idx = 0
         while self.curr_idx < len(self.units):
@@ -418,6 +455,7 @@ class BattlecodeEnv:
                 if self.lead[selected] == 0:
                     available_lead.remove(selected)
                 bot.add_act_cost(self.rubble[bot.y, bot.x])
+                self.round_metrics[f"lead_mined"] += 1
 
         # auto-repair
         if (
@@ -439,12 +477,14 @@ class BattlecodeEnv:
                 (bot.y + dy, bot.x + dx)
                 for (dy, dx) in DIRECTIONS[1:]
                 if (bot.y + dy, bot.x + dx) not in self.pos_map
+                and self.in_bounds(bot.y + dy, bot.x + dx)
             ]
             assert len(available_pos) > 0
             chosen_pos = tuple(self.rng.choice(available_pos))
             self.create_unit(Laboratory, chosen_pos, bot.team)
             bot.add_act_cost(self.rubble[bot.y, bot.x])
 
+        # auto-attacking
         if isinstance(bot, (Soldier, Sage)) and bot.act_cd < 10:
             nearby_enemies = list(
                 self.nearby_bots(
@@ -463,19 +503,21 @@ class BattlecodeEnv:
                 )
                 self.process_attack(bot, chosen_enemy)
 
+        # droid creation
         if isinstance(bot, Archon) and action != 0:
-            all_spawn_pos = [
-                pos
-                for dy, dx in DIRECTIONS[1:]
-                if (pos := (bot.y + dy, bot.x + dx)) not in self.pos_map
-            ]
             map_center = (self.rubble.shape[0] // 2, self.rubble.shape[1] // 2)
-            good_spawn_pos = [
-                pos
-                for pos in all_spawn_pos
-                if abs(pos[0] - map_center[0]) + abs(pos[1] - map_center[1])
-                < abs(bot.y - map_center[0]) + abs(bot.x - map_center[1])
-            ]
+            all_spawn_pos = []
+            good_spawn_pos = []
+            for dy, dx in DIRECTIONS[1:]:
+                y = bot.y + dy
+                x = bot.x + dx
+                if (y, x) not in self.pos_map and self.in_bounds(y, x):
+                    all_spawn_pos.append((y, x))
+                    if abs(y - map_center[0]) + abs(x - map_center[1]) < abs(
+                        bot.y - map_center[0]
+                    ) + abs(bot.x - map_center[1]):
+                        good_spawn_pos.append((y, x))
+
             chosen_pos = tuple(
                 self.rng.choice(good_spawn_pos if good_spawn_pos else all_spawn_pos)
             )
@@ -488,13 +530,16 @@ class BattlecodeEnv:
             new_unit_class = unit_class_map[action]
             self.create_unit(new_unit_class, chosen_pos, bot.team)
             bot.add_act_cost(self.rubble[bot.y, bot.x])
+            self.round_metrics[f"spawned_{new_unit_class.__name__.lower()}"] += 1
 
+        # auto-transmute
         if isinstance(bot, Laboratory) and action == 1:
             nearby = 0
             for (dy, dx) in within_radius(bot.vis_rad):
                 y, x = bot.y + dy, bot.x + dx
                 if (y, x) in self.pos_map and self.pos_map[y, x].team == bot.team:
                     nearby += 1
+
             lead_cost = bot.lead_ratio(nearby)
             self.lead_banks[bot.team] -= lead_cost
             self.gold_banks[bot.team] += 1
@@ -524,5 +569,7 @@ class BattlecodeEnv:
         self.prev_value_differential = value_differential
 
         # TODO win reward
+
+        self.logger.push(self.round_metrics)
 
         return ret
