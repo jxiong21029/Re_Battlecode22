@@ -17,4 +17,5 @@ dependencies:
   - tqdm
   - pip
   - pip:
+      - pygame
       - ray[tune]

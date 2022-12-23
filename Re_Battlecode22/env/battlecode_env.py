@@ -7,7 +7,6 @@ import numpy as np
 
 from ..utils import (
     DIRECTIONS,
-    Logger,
     global_symmetry_transform,
     symmetry_transform,
     within_radius,
@@ -29,20 +28,20 @@ class BattlecodeEnv:
     def __init__(
         self,
         map_selection: str | None = None,
+        max_episode_length: int = 2000,
         augment_obs: bool = False,  # TODO
         gold_reward_shaping_factor: float = 5.0,
         reward_shaping_depends_hp: bool = True,
-        logger=None,
         seed: int | None = None,
     ):
         self.map_selection = map_selection
+        self.max_episode_length = max_episode_length
         self.map_name = None
         self.augment_obs = augment_obs
         self.gold_reward_shaping_factor = gold_reward_shaping_factor
         self.reward_shaping_depends_hp = reward_shaping_depends_hp
-        self.rng = np.random.default_rng(seed)
-        self.logger = Logger() if logger is None else logger
         self.seed = seed
+        self.rng = np.random.default_rng(seed)
 
         self.rubble = None
         self.lead = None
@@ -56,7 +55,6 @@ class BattlecodeEnv:
         self.done = None
         self.curr_idx = None
         self.prev_value_differential = None
-
         self.round_metrics = None
 
     def in_bounds(self, y, x):
@@ -293,13 +291,15 @@ class BattlecodeEnv:
                 break
 
         if isinstance(bot, Builder):
-            assert ret.shape == (10,)
+            assert ret.shape == (11,)
             if (
                 self.lead_banks[bot.team] >= Laboratory.lead_value
                 and bot.act_cd < 10
                 and adj_available
             ):
                 ret[9] = True
+            if self.lead[bot.y, bot.x] == 0:
+                ret[10] = True  # disintegrate for lead farm
         elif isinstance(bot, (Soldier, Sage)):
             assert ret.shape == (9,)
             pass  # TODO attack actions, eventually
@@ -351,7 +351,6 @@ class BattlecodeEnv:
             raise TypeError
 
         assert bot.act_cd < 10
-        assert (target.y - bot.y) ** 2 + (target.x - bot.x) ** 2 <= bot.act_rad
 
         bot.add_act_cost(self.rubble[bot.y, bot.x])
 
@@ -377,6 +376,16 @@ class BattlecodeEnv:
 
         return dmg_dealt, killed
 
+    def disintegrate(self, bot):
+        assert isinstance(bot, Builder)
+        self.lead[bot.y, bot.x] += int(0.2 * bot.lead_value)
+        idx = self.units.index(bot)
+
+        del self.units[idx]
+        del self.pos_map[(bot.y, bot.x)]
+        if idx <= self.curr_idx:
+            self.curr_idx -= 1
+
     def create_unit(self, unit_class, pos, team):
         assert pos not in self.pos_map
         assert self.in_bounds(pos[0], pos[1])
@@ -395,7 +404,7 @@ class BattlecodeEnv:
     ) -> typing.Generator[tuple[Entity, np.ndarray, np.ndarray], None, None]:
         """Yields Entity objects, observations, and action masks"""
         assert self.curr_idx is None
-        assert self.t < 2000
+        assert self.t < self.max_episode_length
 
         self.round_metrics = {
             "spawned_miner": 0,
@@ -427,14 +436,18 @@ class BattlecodeEnv:
             self.curr_idx += 1
         self.curr_idx = None
 
+        for bot in self.units:
+            bot.move_cd = max(0, bot.move_cd - 10)
+            bot.act_cd = max(0, bot.act_cd - 10)
+
         self.t += 1
-        if self.t == 2000:
+        if self.t == self.max_episode_length:
             self.done = True
         else:
             self.lead_banks[0] += 2
             self.lead_banks[1] += 2
             if self.t % 20 == 0:
-                self.rubble[self.rubble > 0] += 5
+                self.lead[self.lead > 0] += 5
 
     def step(self, bot, action, obs_symmetry=0):
         if not isinstance(bot, Building) and 1 <= action <= 8:
@@ -446,13 +459,13 @@ class BattlecodeEnv:
                 pos
                 for (dy, dx) in within_radius(bot.act_rad, prev_move=action)
                 if self.in_bounds(bot.y + dy, bot.x + dx)
-                and self.lead[pos := (bot.y + dy, bot.x + dx)] > 0
+                and self.lead[pos := (bot.y + dy, bot.x + dx)] >= 1
             ]
             while available_lead and bot.act_cd < 10:
                 selected = tuple(self.rng.choice(available_lead))
                 self.lead[selected] -= 1
                 self.lead_banks[bot.team] += 1
-                if self.lead[selected] == 0:
+                if self.lead[selected] <= 1:
                     available_lead.remove(selected)
                 bot.add_act_cost(self.rubble[bot.y, bot.x])
                 self.round_metrics[f"lead_mined"] += 1
@@ -465,7 +478,11 @@ class BattlecodeEnv:
             targets = list(
                 self.nearby_bots(bot.y, bot.x, bot.act_rad, bot.team, prev_move=action)
             )
-            targets = [target for target in targets if target.curr_hp < target.max_hp]
+            targets = [
+                target
+                for target in targets
+                if target.curr_hp < target.max_hp and target != bot
+            ]
             if targets:
                 selected = self.rng.choice(targets)
                 self.process_attack(bot, selected)
@@ -483,6 +500,10 @@ class BattlecodeEnv:
             chosen_pos = tuple(self.rng.choice(available_pos))
             self.create_unit(Laboratory, chosen_pos, bot.team)
             bot.add_act_cost(self.rubble[bot.y, bot.x])
+
+        # disintegrate
+        if isinstance(bot, Builder) and action == 10:
+            self.disintegrate(bot)
 
         # auto-attacking
         if isinstance(bot, (Soldier, Sage)) and bot.act_cd < 10:
@@ -570,6 +591,7 @@ class BattlecodeEnv:
 
         # TODO win reward
 
-        self.logger.push(self.round_metrics)
-
         return ret
+
+    def push_round_metrics(self, logger):
+        logger.push(self.round_metrics)

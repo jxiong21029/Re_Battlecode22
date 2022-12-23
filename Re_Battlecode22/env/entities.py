@@ -91,6 +91,9 @@ class Entity(ABC):
     def add_act_cost(self, rubble: int):
         self.act_cd += math.floor(1 + rubble / 10) * self.act_cost
 
+    def __repr__(self):
+        return f"{self.__class__.__name__}(team={self.team})@({self.y:02},{self.x:02})"
+
 
 class Miner(Entity):
     lead_value = 50
@@ -123,7 +126,7 @@ class Builder(Entity):
     observation_space = gym.spaces.Box(
         -np.inf, np.inf, shape=(5 + len(within_radius(20)) * 5,)
     )
-    action_space = gym.spaces.Discrete(10)
+    action_space = gym.spaces.Discrete(11)
 
 
 class Soldier(Entity):

@@ -114,6 +114,9 @@ class Logger:
 
     def generate_plots(self, dirname="plotgen"):
         import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        sns.set_theme()
 
         if not self._cleared_prev_plots:
             if os.path.isdir(dirname):

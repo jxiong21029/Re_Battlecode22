@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import tqdm
 
 from .env import Archon, BattlecodeEnv, Builder, Miner, Sage, Soldier
+from .env.rendering import Renderer
 from .utils import Logger
 
 
@@ -24,6 +25,7 @@ class Model(nn.Module):
         augment_inputs=True,
         augment_targets=True,
         target_augmentations=4,
+        logger=None,
         seed=None,
     ):
         super().__init__()
@@ -31,6 +33,7 @@ class Model(nn.Module):
         self.augment_inputs = augment_inputs  # TODO augmentations
         self.augment_targets = augment_targets
         self.target_augmentations = target_augmentations
+        self.logger = logger
 
         self.utility_nets = nn.ModuleDict(
             {
@@ -71,11 +74,18 @@ class Model(nn.Module):
                     action_qs = self.utility_nets[bot.__class__.__name__](
                         torch.tensor(obs)
                     )
-                    action_qs[~action_mask] = -1e8
-                    action = torch.argmax(action_qs).item()
+                    if bot.team == 0:
+                        action_qs[~action_mask] = -1e8
+                        action = torch.argmax(action_qs).item()
+                    else:
+                        assert bot.team == 1
+                        action_qs[~action_mask] = 1e8
+                        action = torch.argmin(action_qs).item()
                 actions.append(action)
                 env.step(bot, action)
+
         reward = env.get_team_reward()
+        env.push_round_metrics(self.logger)
         return actions, reward
 
     def forward(
@@ -125,7 +135,6 @@ class Trainer:
         self.verbose = verbose
 
         self.env = env
-        self.env.logger = self.logger
         self.env.reset()
         self.discount_factor = discount_factor
 
@@ -133,7 +142,7 @@ class Trainer:
         self.steps_per_update = steps_per_update
         self.minibatch_size = minibatch_size
 
-        self.model = Model(seed=self.rng.integers(2**32))
+        self.model = Model(seed=self.rng.integers(2**32), logger=self.logger)
         self.optim = torch.optim.Adam(self.model.parameters(), lr=lr)
         self.target_model = copy.deepcopy(self.model)
         self.target_update_period = target_update_period
@@ -219,3 +228,14 @@ class Trainer:
                 self.logger.generate_plots()
 
             self.t += 1
+
+    def eval_with_render(self, eps=0):
+        renderer = Renderer()
+        eval_env = copy.deepcopy(self.env)
+        eval_env.reset()
+
+        with tqdm.tqdm(total=2000) as pbar:
+            while not eval_env.done:
+                renderer.render(eval_env)
+                self.model.explore_step(eval_env, eps)
+                pbar.update(1)

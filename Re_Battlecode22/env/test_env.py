@@ -5,6 +5,7 @@ import pytest
 
 from ..utils import symmetry_transform
 from .battlecode_env import BattlecodeEnv
+from .entities import Archon
 
 SEED = 69420
 
@@ -50,6 +51,24 @@ def test_symmetry_transform():
         actual_results.add(result)
         assert result == symmetry_transform(starty, startx, symmetry + 8, 4, 4)
     assert expected_results == actual_results
+
+
+def test_terrain(sample_envs):
+    for env in sample_envs:
+        assert (0 <= env.rubble).all() and (env.rubble <= 100).all()
+
+
+def test_archon_counts(sample_envs):
+    for env in sample_envs:
+        for team in (0, 1):
+            assert (
+                sum(
+                    1
+                    for unit in env.units
+                    if unit.team == team and isinstance(unit, Archon)
+                )
+                == env.archon_counts[team]
+            )
 
 
 def test_global_symmetry_yflip(sample_envs):
