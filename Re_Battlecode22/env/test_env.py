@@ -15,7 +15,7 @@ def make_sample_env(num_rounds, seed):
     env = BattlecodeEnv(seed=rng.integers(2**31))
     env.reset()
     for _ in range(num_rounds):
-        for bot, obs, act_mask in env.agent_inputs():
+        for bot, obs, act_mask in env.iter_agents():
             selected_action = rng.choice(np.arange(bot.action_space.n)[act_mask])
             env.step(bot, selected_action)
     return env
@@ -28,7 +28,7 @@ def sample_envs():
     ret = [BattlecodeEnv(seed=rng.integers(2**32))]
     ret[0].reset()
 
-    for num_rounds in (1, 5, 5, 5, 100, 100):
+    for num_rounds in (1, 5, 5, 5, 100, 100, 100):
         ret.append(make_sample_env(num_rounds, seed=rng.integers(2**32)))
     return ret
 
@@ -113,3 +113,9 @@ def test_pos_map(sample_envs: list[BattlecodeEnv]):
             assert env.pos_map[(unit.y, unit.x)] is unit, breakpoint()
         for pos, unit in env.pos_map.items():
             assert pos == (unit.y, unit.x)
+
+
+def test_unsigned_problems(sample_envs: list[BattlecodeEnv]):
+    for env in sample_envs:
+        assert (env.lead <= 100).all()
+        assert (env.gold <= 100).all()

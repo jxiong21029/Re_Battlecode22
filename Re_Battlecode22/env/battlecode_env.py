@@ -10,7 +10,7 @@ class BattlecodeEnv:
     def __init__(
         self,
         map_selection: str | None = None,
-        augment_obs: bool = True,
+        augment_obs: bool = False,  # TODO
         gold_reward_shaping_factor: float = 5.0,
         reward_shaping_depends_hp: bool = True,
         seed: int | None = None,
@@ -64,8 +64,8 @@ class BattlecodeEnv:
             else f"Re_Battlecode22/maps/data/{self.map_selection}.npz"
         )
 
-        self.rubble = data["rubble"].astype(np.int8)
-        self.lead = data["lead"].astype(np.int8)
+        self.rubble = data["rubble"].astype(np.uint8)
+        self.lead = data["lead"].astype(np.uint8)
         self.gold = np.zeros_like(self.lead)
 
         self.t = 0
@@ -363,9 +363,10 @@ class BattlecodeEnv:
 
     # passes through all agents once in order, yielding Entity objects, observations,
     # and action masks
-    def agent_inputs(
+    def iter_agents(
         self,
     ) -> typing.Generator[tuple[Entity, np.ndarray, np.ndarray], None, None]:
+        """Yields Entity objects, observations, and action masks"""
         assert self.curr_idx is None
         assert self.t < 2000
 
@@ -376,6 +377,7 @@ class BattlecodeEnv:
             # temporary heuristic behavior, not policy-controlled
             if isinstance(bot, Laboratory):
                 self.step(bot, action=1)
+                self.curr_idx += 1
                 continue
 
             assert not isinstance(bot, Watchtower)  # TODO
@@ -407,7 +409,7 @@ class BattlecodeEnv:
                 pos
                 for (dy, dx) in within_radius(bot.act_rad, prev_move=action)
                 if self.in_bounds(bot.y + dy, bot.x + dx)
-                and (self.lead[pos := (bot.y + dy, bot.x + dx)]) > 0
+                and self.lead[pos := (bot.y + dy, bot.x + dx)] > 0
             ]
             while available_lead and bot.act_cd < 10:
                 selected = tuple(self.rng.choice(available_lead))
