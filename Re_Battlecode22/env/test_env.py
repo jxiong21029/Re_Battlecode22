@@ -1,4 +1,5 @@
 import copy
+import random
 
 import numpy as np
 import pytest
@@ -10,26 +11,25 @@ from .entities import Archon
 SEED = 69420
 
 
-def make_sample_env(num_rounds, seed):
-    rng = np.random.default_rng(seed)
-    env = BattlecodeEnv(seed=rng.integers(2**31))
+def make_sample_env(num_rounds):
+    env = BattlecodeEnv()
     env.reset()
     for _ in range(num_rounds):
         for bot, obs, act_mask in env.iter_agents():
-            selected_action = rng.choice(np.arange(bot.action_space.n)[act_mask])
+            selected_action = random.choice(np.arange(bot.action_space.n)[act_mask])
             env.step(bot, selected_action)
     return env
 
 
 @pytest.fixture
 def sample_envs():
-    rng = np.random.default_rng(SEED)
+    random.seed(0xBEEF)
 
-    ret = [BattlecodeEnv(seed=rng.integers(2**32))]
+    ret = [BattlecodeEnv()]
     ret[0].reset()
 
-    for num_rounds in (1, 5, 5, 5, 100, 100, 100):
-        ret.append(make_sample_env(num_rounds, seed=rng.integers(2**32)))
+    for num_rounds in (1, 5, 5, 5, 100, 100, 100, 100):
+        ret.append(make_sample_env(num_rounds))
     return ret
 
 
@@ -135,5 +135,5 @@ def test_pos_map(sample_envs: list[BattlecodeEnv]):
 
 def test_unsigned_problems(sample_envs: list[BattlecodeEnv]):
     for env in sample_envs:
-        assert (env.lead <= 100).all()
-        assert (env.gold <= 100).all()
+        assert (env.lead <= 200).all()
+        assert (env.gold <= 200).all()

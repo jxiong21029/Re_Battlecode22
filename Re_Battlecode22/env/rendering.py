@@ -1,7 +1,7 @@
+import math
 import os
 import sys
 import time
-import math
 
 import numpy as np
 import pygame
@@ -21,9 +21,7 @@ def rubble_color(rubble_amt):
 
 class Renderer:
     def __init__(self):
-        self.screen = pygame.display.set_mode(
-            (1000, 700)
-        )
+        self.screen = pygame.display.set_mode((1000, 700))
 
     def render(self, env):
         size = math.floor(min(1000 / env.rubble.shape[1], 700 / env.rubble.shape[0]))

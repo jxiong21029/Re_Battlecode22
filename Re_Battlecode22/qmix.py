@@ -1,4 +1,5 @@
 import copy
+import random
 from dataclasses import dataclass
 
 import numpy as np
@@ -8,7 +9,8 @@ import torch.nn.functional as F
 import tqdm
 
 from .env import Archon, BattlecodeEnv, Builder, Miner, Sage, Soldier
-from .env.rendering import Renderer
+
+# from .env.rendering import Renderer
 from .utils import Logger
 
 
@@ -19,17 +21,15 @@ class Transition:
     reward: float
 
 
-class Model(nn.Module):
+class QMixAgents(nn.Module):
     def __init__(
         self,
         augment_inputs=True,
         augment_targets=True,
         target_augmentations=4,
         logger=None,
-        seed=None,
     ):
         super().__init__()
-        self.rng = np.random.default_rng(seed)
         self.augment_inputs = augment_inputs  # TODO augmentations
         self.augment_targets = augment_targets
         self.target_augmentations = target_augmentations
@@ -62,18 +62,18 @@ class Model(nn.Module):
             nn.Conv2d(16, 1, kernel_size=1),
         )
 
-    def explore_step(self, env: BattlecodeEnv, epsilon=0.01) -> tuple[list[int], float]:
+    def explore_step(self, env: BattlecodeEnv, epsilon=0.01, return_obs=False):
+        observations = []
         actions = []
         with torch.no_grad():
             for bot, obs, action_mask in env.iter_agents():
-                if self.rng.random() < epsilon:
-                    action = self.rng.choice(
-                        np.arange(action_mask.shape[0])[action_mask]
-                    )
+                if random.random() < epsilon:
+                    action = random.choice(np.arange(action_mask.shape[0])[action_mask])
                 else:
-                    action_qs = self.utility_nets[bot.__class__.__name__](
-                        torch.tensor(obs)
-                    )
+                    new_obs = torch.tensor(obs)
+                    if return_obs:
+                        observations.append(new_obs)
+                    action_qs = self.utility_nets[bot.__class__.__name__](new_obs)
                     if bot.team == 0:
                         action_qs[~action_mask] = -1e8
                         action = torch.argmax(action_qs).item()
@@ -86,6 +86,8 @@ class Model(nn.Module):
 
         reward = env.get_team_reward()
         env.push_round_metrics(self.logger)
+        if return_obs:
+            return observations, actions, reward
         return actions, reward
 
     def forward(
@@ -98,7 +100,7 @@ class Model(nn.Module):
 
         global_q = torch.tensor(0.0)
         curr_env = copy.deepcopy(env_state)
-        for i, (bot, obs, action_mask) in enumerate(curr_env.iter_agents()):
+        for i, (bot, obs, _) in enumerate(curr_env.iter_agents()):
             action_qs = self.utility_nets[bot.__class__.__name__](torch.tensor(obs))
 
             local_q = action_qs[actions[i]]
@@ -106,6 +108,19 @@ class Model(nn.Module):
             curr_env.step(bot, actions[i])
 
         return global_q, curr_env
+
+    # def forward_precomputed(self, env_state, observations, actions):
+    #     x = self.conv1(torch.tensor(env_state.global_observation()))
+    #     x = self.squeeze_and_excite(x)[:, None, None] * x
+    #     weights = F.softplus(self.head(x).squeeze(0))  # (1, H, W), then (H, W)
+    #
+    #     global_q = torch.tensor(0.0)
+    #     for i, (bot, obs, action) in enumerate(
+    #         zip(env_state.units, observations, actions)
+    #     ):
+    #         action_qs = self.utility_nets[bot.__class__.__name__](obs)
+    #         global_q += weights[bot.y, bot.x] * action_qs[action]
+    #     return global_q
 
 
 class Trainer:
@@ -116,7 +131,7 @@ class Trainer:
         buffer_size=128_000,
         steps_per_update=4,
         minibatch_size=32,
-        lr=1e-4,
+        lr=1e-3,
         target_update_period=8000,
         target_update_polyak=1,
         pre_learning_steps=8_000,
@@ -125,11 +140,9 @@ class Trainer:
         epsilon_min=0.01,
         logging_interval=1000,
         verbose=False,
-        seed=None,
     ):
         assert pre_learning_steps + epsilon_decrease_steps <= buffer_size
 
-        self.rng = np.random.default_rng(seed)
         self.logging_interval = logging_interval
         self.logger = Logger()
         self.verbose = verbose
@@ -142,7 +155,7 @@ class Trainer:
         self.steps_per_update = steps_per_update
         self.minibatch_size = minibatch_size
 
-        self.model = Model(seed=self.rng.integers(2**32), logger=self.logger)
+        self.model = QMixAgents(logger=self.logger)
         self.optim = torch.optim.Adam(self.model.parameters(), lr=lr)
         self.target_model = copy.deepcopy(self.model)
         self.target_update_period = target_update_period
@@ -188,7 +201,7 @@ class Trainer:
             ):
                 loss = torch.tensor(0.0)
                 for _ in range(self.minibatch_size):
-                    transition = self.rng.choice(self.replay_buffer)
+                    transition = random.choice(self.replay_buffer)
                     y, next_state = self.model(transition.env_state, transition.actions)
 
                     if next_state.done:
@@ -201,6 +214,7 @@ class Trainer:
                         target = transition.reward + self.discount_factor * next_q
 
                     loss += ((y - target) ** 2) / self.minibatch_size
+                    self.logger.push(td_error=(y - target).item(), loss=loss.item())
 
                 self.optim.zero_grad(set_to_none=True)
                 loss.backward()
@@ -217,19 +231,15 @@ class Trainer:
                     ):
                         p2[:] = self.tau * p1 + (1 - self.tau) * p2
 
-            if (
-                self.t < self.pre_learning_steps
-                and (self.t + 1) % self.logging_interval == 0
-            ) or (
-                self.t >= self.pre_learning_steps
-                and (self.t - self.pre_learning_steps + 1) % self.logging_interval == 0
-            ):
+            if (self.t + 1) % self.logging_interval == 0:
                 self.logger.step()
                 self.logger.generate_plots()
 
             self.t += 1
 
     def eval_with_render(self, eps=0):
+        from .env.rendering import Renderer
+
         renderer = Renderer()
         eval_env = copy.deepcopy(self.env)
         eval_env.reset()

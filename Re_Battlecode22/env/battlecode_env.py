@@ -1,5 +1,6 @@
 import glob
 import os
+import random
 import typing
 from collections import defaultdict
 
@@ -32,7 +33,7 @@ class BattlecodeEnv:
         augment_obs: bool = False,  # TODO
         gold_reward_shaping_factor: float = 5.0,
         reward_shaping_depends_hp: bool = True,
-        seed: int | None = None,
+        reward_scaling_factor: float = 0.1,
     ):
         self.map_selection = map_selection
         self.max_episode_length = max_episode_length
@@ -40,8 +41,8 @@ class BattlecodeEnv:
         self.augment_obs = augment_obs
         self.gold_reward_shaping_factor = gold_reward_shaping_factor
         self.reward_shaping_depends_hp = reward_shaping_depends_hp
-        self.seed = seed
-        self.rng = np.random.default_rng(seed)
+        self.reward_scaling_factor = reward_scaling_factor
+        self.rng = random.Random()
 
         self.rubble = None
         self.lead = None
@@ -137,15 +138,6 @@ class BattlecodeEnv:
             for unit in self.units:
                 if unit.team == bot.team:
                     counts[unit.__class__.__name__.lower()] += 1
-            for key in counts.keys():
-                assert key in (
-                    "miner",
-                    "builder",
-                    "soldier",
-                    "sage",
-                    "laboratory",
-                    "archon",
-                )
 
             yy, xx = self.pos_symmetry(bot.y, bot.x, symmetry)
             return np.array(
@@ -428,7 +420,7 @@ class BattlecodeEnv:
 
             assert not isinstance(bot, Watchtower)  # TODO
 
-            symmetry = self.rng.integers(16) if self.augment_obs else 0
+            symmetry = self.rng.randrange(0, 16) if self.augment_obs else 0
             yield bot, self.observe(bot, symmetry), self.legal_action_mask(
                 bot, symmetry
             )
@@ -462,7 +454,7 @@ class BattlecodeEnv:
                 and self.lead[pos := (bot.y + dy, bot.x + dx)] >= 1
             ]
             while available_lead and bot.act_cd < 10:
-                selected = tuple(self.rng.choice(available_lead))
+                selected = self.rng.choice(available_lead)
                 self.lead[selected] -= 1
                 self.lead_banks[bot.team] += 1
                 if self.lead[selected] <= 1:
@@ -497,7 +489,7 @@ class BattlecodeEnv:
                 and self.in_bounds(bot.y + dy, bot.x + dx)
             ]
             assert len(available_pos) > 0
-            chosen_pos = tuple(self.rng.choice(available_pos))
+            chosen_pos = self.rng.choice(available_pos)
             self.create_unit(Laboratory, chosen_pos, bot.team)
             bot.add_act_cost(self.rubble[bot.y, bot.x])
 
@@ -539,8 +531,8 @@ class BattlecodeEnv:
                     ) + abs(bot.x - map_center[1]):
                         good_spawn_pos.append((y, x))
 
-            chosen_pos = tuple(
-                self.rng.choice(good_spawn_pos if good_spawn_pos else all_spawn_pos)
+            chosen_pos = self.rng.choice(
+                good_spawn_pos if good_spawn_pos else all_spawn_pos
             )
 
             unit_class_map = {
@@ -569,6 +561,18 @@ class BattlecodeEnv:
         if min(self.archon_counts) == 0:
             self.done = True
 
+    def winner(self):
+        if self.archon_counts[0] != self.archon_counts[1]:
+            return 0 if self.archon_counts[0] > self.archon_counts[1] else 1
+        lead_values = self.lead_banks.copy()
+        gold_values = self.gold_banks.copy()
+        for unit in self.units:
+            lead_values[unit.team] += unit.lead_value
+            gold_values[unit.team] += unit.gold_value
+        if gold_values[0] != gold_values[1]:
+            return 0 if gold_values[0] > gold_values[1] else 1
+        return 0 if lead_values[0] > lead_values[1] else 1
+
     # reward for team 0 shared reward (zero sum --> equal to negative team 1 reward)
     def get_team_reward(self):
         assert self.curr_idx is None  # not in middle of units pass
@@ -586,7 +590,9 @@ class BattlecodeEnv:
             else:
                 value_differential -= unit_value
 
-        ret = value_differential - self.prev_value_differential
+        ret = (
+            value_differential - self.prev_value_differential
+        ) * self.reward_scaling_factor
         self.prev_value_differential = value_differential
 
         # TODO win reward
