@@ -2,7 +2,6 @@ import random
 
 import torch
 
-from Re_Battlecode22.env import BattlecodeEnv
 from Re_Battlecode22.qmix import Trainer
 
 
@@ -40,7 +39,7 @@ def main():
     learn(trainer)
 
 
-main()
+
 
 # TODO: episode-length metrics
 # TODO: more testing -- environment, trainer objects/refs, reward / value propagation

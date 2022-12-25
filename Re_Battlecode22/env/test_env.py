@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 
 from ..utils import symmetry_transform
-from .battlecode_env import BattlecodeEnv
 from .entities import Archon
+from .preprocess import BattlecodeEnv
 
 SEED = 69420
 
