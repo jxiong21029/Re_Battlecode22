@@ -20,8 +20,8 @@ def profileit(func):
 
 
 @profileit
-def train2(trainer):
-    trainer.learn(num_steps=1000)
+def learn(trainer):
+    trainer.learn(1000)
 
 
 def main():
@@ -36,15 +36,12 @@ def main():
         buffer_size=128_000,
         pre_learning_steps=1_000,
     )
-    # trainer.eval_with_render(eps=1)
     trainer.learn(num_steps=1_000)
-    train2(trainer)
+    learn(trainer)
 
 
 main()
 
-
-# TODO: reward normalization
 # TODO: episode-length metrics
 # TODO: more testing -- environment, trainer objects/refs, reward / value propagation
 #   verify action masks

@@ -5,6 +5,7 @@ import typing
 from collections import defaultdict
 
 import numpy as np
+import torch
 
 from ..utils import (
     DIRECTIONS,
@@ -56,7 +57,7 @@ class BattlecodeEnv:
         self.done = None
         self.curr_idx = None
         self.prev_value_differential = None
-        self.round_metrics = None
+        self.episode_metrics = None
 
     def in_bounds(self, y, x):
         return 0 <= y < self.rubble.shape[0] and 0 <= x < self.rubble.shape[1]
@@ -103,89 +104,109 @@ class BattlecodeEnv:
             self.pos_map[(unit.y, unit.x)] = unit
         self.archon_counts = [len(self.units) // 2, len(self.units) // 2]
         self.prev_value_differential = 0
+        self.episode_metrics = defaultdict(float)
         self.done = False
 
-    # basic observation features, observed by all bots (simplified for now)
-    # - own x, own y
-    # - own move & action cd, // 10, (+log scale?)
-    # - TODO: own is turret / is portable
+    def observations(self) -> list[torch.Tensor]:
+        cls_map = {
+            Miner: 0,
+            Builder: 1,
+            Soldier: 2,
+            Sage: 3,
+            Archon: 4,
+            Laboratory: 5,
+        }
+        unit_counts = {cls: [0, 0] for cls in cls_map.keys()}
+        global_hp = np.zeros((2,) + self.rubble.shape, dtype=np.float32)
+        global_is_building = np.zeros((2,) + self.rubble.shape, dtype=np.float32)
+        # classes = np.zeros(len(self.units), dtype=np.int8)
+        # teams = np.zeros(len(self.units), dtype=np.int8)
+        for i, unit in enumerate(self.units):
+            unit_counts[unit.__class__][unit.team] += 1
+            global_hp[unit.team, unit.y, unit.x] = np.log1p(unit.curr_hp)  # cuz why not
+            if isinstance(unit, Building):
+                global_is_building[unit.team, unit.y, unit.x] = 1
+            # classes[i] = cls_map[unit.__class__]
+            # teams[i] = unit.team
 
-    # cell observation features, observed by all non-building bots (simplified for now):
-    # - rubble
-    # - ally log hp, ally is building
-    # - enemy log hp, enemy is building
-    # - TODO: other unit move and action cd
-
-    # other observations:
-    # - miner: cell observations also include log lead and log gold
-    # - archon: only sees timestep, lead bank, gold bank, allied count of each unit
-
-    # action space (simplified for now):
-    # - miner: Discrete(9) movements
-    #       - auto-mines nearby resources
-    # - builder: Discrete(9) movements x Discrete(2) [repair / idle, spawn lab]
-    # - soldier: Discrete(9) movements
-    #       - auto-attacks enemy (heuristic)
-    # - sage: Discrete(9) movements
-    #       - auto-attacks enemy (heuristic)
-    # - archon: Discrete(4) [repair / idle, spawn miner, spawn builder, spawn combat]
-    # - lab: auto-converts lead to gold
-
-    def observe(self, bot, symmetry=0):  # 4 rotations * 2 reflections * 2 team swaps
-        # team swap has no effect on observe() due to locality
-        if isinstance(bot, Archon):
-            counts = defaultdict(int)
-            for unit in self.units:
-                if unit.team == bot.team:
-                    counts[unit.__class__.__name__.lower()] += 1
-
-            yy, xx = self.pos_symmetry(bot.y, bot.x, symmetry)
-            return np.array(
-                [
-                    (yy - self.rubble.shape[0] / 2 + 0.5) / 30,
-                    (xx - self.rubble.shape[1] / 2 + 0.5) / 30,
-                    self.rubble.shape[0 if symmetry % 8 >= 4 else 1] / 60,
-                    self.rubble.shape[1 if symmetry % 8 >= 4 else 0] / 60,
-                    self.t / 2000,
-                    self.lead_banks[bot.team] / 256,
-                    self.gold_banks[bot.team] / 64,
-                    counts["miner"] / 32,
-                    counts["builder"] / 32,
-                    counts["soldier"] / 32,
-                    counts["sage"] / 32,
-                ],
+        ret = {
+            cls: np.zeros(
+                (sum(unit_counts[cls]), cls.observation_space.shape[0]),
                 dtype=np.float32,
             )
-        elif isinstance(bot, (Laboratory, Watchtower)):
-            raise NotImplementedError
-        else:
-            assert isinstance(bot, (Miner, Builder, Soldier, Sage))
-            by, bx = self.pos_symmetry(bot.y, bot.x, symmetry)
-            ret = [by, bx, bot.curr_hp, bot.move_cd, bot.act_cd]
+            for cls in cls_map.keys()
+            if cls != Laboratory
+        }
 
-            for dy, dx in within_radius(bot.vis_rad, symmetry=symmetry):
-                y, x = bot.y + dy, bot.x + dx
-                other: Entity = self.pos_map[(y, x)] if (y, x) in self.pos_map else None
-                is_ally = other is not None and other.team == bot.team
-                is_enemy = other is not None and other.team != bot.team
-                is_building = float(isinstance(other, Building))
-                ret.extend(
-                    [
-                        self.rubble[y, x] / 100 if self.in_bounds(y, x) else 0,
-                        other.curr_hp / 512 if is_ally else 0,
-                        is_building if is_ally else 0,
-                        other.curr_hp / 512 if is_enemy else 0,
-                        is_building if is_enemy else 0,
-                    ]
+        # map height, map width, timestep, lead bank, gold bank, 4 unit counts = 11
+        archon_obs = ret[Archon]
+        archon_obs[:, 0:2] = self.rubble.shape
+        archon_obs[:, 2] = self.t / 2000
+        i = 0
+        for unit in self.units:
+            if isinstance(unit, Archon):
+                archon_obs[i, 3:11] = [
+                    (unit.y - self.rubble.shape[0] / 2 + 0.5) / 30,
+                    (unit.x - self.rubble.shape[1] / 2 + 0.5) / 30,
+                    self.lead_banks[unit.team] / 128,
+                    self.gold_banks[unit.team] / 32,
+                    unit_counts[Miner][unit.team] / 16,
+                    unit_counts[Builder][unit.team] / 16,
+                    unit_counts[Soldier][unit.team] / 16,
+                    unit_counts[Sage][unit.team] / 16,
+                ]
+                i += 1
+
+        for cls in (Miner, Builder, Soldier, Sage):
+            cls_obs = ret[cls]
+            cls_coords = []
+            cls_teams = []
+            for unit in self.units:
+                if isinstance(unit, cls):
+                    cls_coords.append(np.array([unit.y, unit.x]))
+                    cls_teams.append(unit.team)
+            if len(cls_teams) == 0:
+                continue
+            cls_coords = np.array(cls_coords).reshape(-1, 2)
+            cls_teams = np.array(cls_teams).reshape(-1)
+
+            for i, (dy, dx) in enumerate(within_radius(cls.vis_rad)):
+                shifted = np.transpose(cls_coords + np.array([dy, dx]))
+                in_bounds_mask = (
+                    (shifted[0] >= 0)
+                    & (shifted[0] < self.rubble.shape[0])
+                    & (shifted[1] >= 0)
+                    & (shifted[1] < self.rubble.shape[1])
                 )
-                if isinstance(bot, Miner):
-                    ret.extend(
-                        [
-                            self.lead[y, x] / 128 if self.in_bounds(y, x) else 0,
-                            self.gold[y, x] / 32 if self.in_bounds(y, x) else 0,
-                        ]
+                shifted = shifted[:, in_bounds_mask]
+
+                fdim = 7 if cls == Miner else 5
+                # rubble, ally HP, ally building, enemy HP, enemy building
+                cls_obs[in_bounds_mask, fdim * i] = (
+                    self.rubble[shifted[0], shifted[1]] / 100
+                )
+                cls_obs[in_bounds_mask, fdim * i + 1] = global_hp[
+                    cls_teams[in_bounds_mask], shifted[0], shifted[1]
+                ]
+                cls_obs[in_bounds_mask, fdim * i + 2] = global_hp[
+                    1 - cls_teams[in_bounds_mask], shifted[0], shifted[1]
+                ]
+                cls_obs[in_bounds_mask, fdim * i + 3] = global_is_building[
+                    cls_teams[in_bounds_mask], shifted[0], shifted[1]
+                ]
+                cls_obs[in_bounds_mask, fdim * i + 4] = global_is_building[
+                    1 - cls_teams[in_bounds_mask], shifted[0], shifted[1]
+                ]
+
+                if cls == Miner:
+                    cls_obs[in_bounds_mask, fdim * i + 5] = (
+                        self.lead[shifted[0], shifted[1]] / 64
                     )
-            return np.array(ret, dtype=np.float32)
+                    cls_obs[in_bounds_mask, fdim * i + 6] = (
+                        self.gold[shifted[0], shifted[1]] / 16
+                    )
+
+        return ret
 
     def global_observation(self, symmetry=0):
         # timestep, lead bank, gold bank for both teams, map size, x, y coordinate (9)
@@ -257,7 +278,7 @@ class BattlecodeEnv:
                 ret[28 + ut, y, x] = unit.act_cd / 100
         return global_symmetry_transform(ret, symmetry)
 
-    def legal_action_mask(self, bot, obs_symmetry=0):
+    def legal_action_mask(self, bot):
         ret = np.zeros(bot.action_space.n, dtype=bool)
 
         ret[0] = True
@@ -350,7 +371,7 @@ class BattlecodeEnv:
         target.curr_hp = min(target.curr_hp - bot.dmg, target.max_hp)
         dmg_dealt = old_hp - max(target.curr_hp, 0)
         killed = target.curr_hp <= 0
-        self.round_metrics["dmg_dealt"] += dmg_dealt
+        self.episode_metrics["dmg_dealt"] += dmg_dealt
         if killed:
             if isinstance(target, Archon):
                 self.archon_counts[target.team] -= 1
@@ -364,7 +385,7 @@ class BattlecodeEnv:
             if idx <= self.curr_idx:
                 self.curr_idx -= 1
 
-            self.round_metrics["units_killed"] += 1
+            self.episode_metrics["units_killed"] += 1
 
         return dmg_dealt, killed
 
@@ -389,24 +410,12 @@ class BattlecodeEnv:
         self.lead_banks[team] -= new_unit.lead_value
         self.gold_banks[team] -= new_unit.gold_value
 
-    # passes through all agents once in order, yielding Entity objects, observations,
-    # and action masks
     def iter_agents(
         self,
-    ) -> typing.Generator[tuple[Entity, np.ndarray, np.ndarray], None, None]:
+    ) -> typing.Generator[tuple[Entity, np.ndarray], None, None]:
         """Yields Entity objects, observations, and action masks"""
         assert self.curr_idx is None
         assert self.t < self.max_episode_length
-
-        self.round_metrics = {
-            "spawned_miner": 0,
-            "spawned_builder": 0,
-            "spawned_soldier": 0,
-            "spawned_sage": 0,
-            "lead_mined": 0,
-            "dmg_dealt": 0,
-            "units_killed": 0,
-        }
 
         self.curr_idx = 0
         while self.curr_idx < len(self.units):
@@ -420,10 +429,7 @@ class BattlecodeEnv:
 
             assert not isinstance(bot, Watchtower)  # TODO
 
-            symmetry = self.rng.randrange(0, 16) if self.augment_obs else 0
-            yield bot, self.observe(bot, symmetry), self.legal_action_mask(
-                bot, symmetry
-            )
+            yield bot, self.legal_action_mask(bot)
 
             self.curr_idx += 1
         self.curr_idx = None
@@ -441,7 +447,7 @@ class BattlecodeEnv:
             if self.t % 20 == 0:
                 self.lead[self.lead > 0] += 5
 
-    def step(self, bot, action, obs_symmetry=0):
+    def step(self, bot, action):
         if not isinstance(bot, Building) and 1 <= action <= 8:
             self.process_move(bot, action)
 
@@ -460,7 +466,7 @@ class BattlecodeEnv:
                 if self.lead[selected] <= 1:
                     available_lead.remove(selected)
                 bot.add_act_cost(self.rubble[bot.y, bot.x])
-                self.round_metrics[f"lead_mined"] += 1
+                self.episode_metrics[f"lead_mined"] += 1
 
         # auto-repair
         if (
@@ -543,7 +549,7 @@ class BattlecodeEnv:
             new_unit_class = unit_class_map[action]
             self.create_unit(new_unit_class, chosen_pos, bot.team)
             bot.add_act_cost(self.rubble[bot.y, bot.x])
-            self.round_metrics[f"spawned_{new_unit_class.__name__.lower()}"] += 1
+            self.episode_metrics[f"spawned_{new_unit_class.__name__.lower()}"] += 1
 
         # auto-transmute
         if isinstance(bot, Laboratory) and action == 1:
@@ -599,5 +605,5 @@ class BattlecodeEnv:
 
         return ret
 
-    def push_round_metrics(self, logger):
-        logger.push(self.round_metrics)
+    def push_episode_metrics(self, logger):
+        logger.push(self.episode_metrics)

@@ -9,8 +9,6 @@ import torch.nn.functional as F
 import tqdm
 
 from .env import Archon, BattlecodeEnv, Builder, Miner, Sage, Soldier
-
-# from .env.rendering import Renderer
 from .utils import Logger
 
 
@@ -24,12 +22,14 @@ class Transition:
 class QMixAgents(nn.Module):
     def __init__(
         self,
+        obs_refresh_prob=0.03,
         augment_inputs=True,
         augment_targets=True,
         target_augmentations=4,
         logger=None,
     ):
         super().__init__()
+        self.obs_refresh_prob = obs_refresh_prob
         self.augment_inputs = augment_inputs  # TODO augmentations
         self.augment_targets = augment_targets
         self.target_augmentations = target_augmentations
@@ -62,52 +62,60 @@ class QMixAgents(nn.Module):
             nn.Conv2d(16, 1, kernel_size=1),
         )
 
-    def explore_step(self, env: BattlecodeEnv, epsilon=0.01, return_obs=False):
-        observations = []
-        actions = []
-        with torch.no_grad():
-            for bot, obs, action_mask in env.iter_agents():
-                if random.random() < epsilon:
-                    action = random.choice(np.arange(action_mask.shape[0])[action_mask])
-                else:
-                    new_obs = torch.tensor(obs)
-                    if return_obs:
-                        observations.append(new_obs)
-                    action_qs = self.utility_nets[bot.__class__.__name__](new_obs)
-                    if bot.team == 0:
-                        action_qs[~action_mask] = -1e8
-                        action = torch.argmax(action_qs).item()
-                    else:
-                        assert bot.team == 1
-                        action_qs[~action_mask] = 1e8
-                        action = torch.argmin(action_qs).item()
-                actions.append(action)
-                env.step(bot, action)
+    def get_q_preds(self, env):
+        obses: dict[type, np.ndarray] = env.observations()
+        q_preds = {}
+        for cls in obses.keys():
+            cls_preds = self.utility_nets[cls.__name__](torch.tensor(obses[cls]))
+            i = 0
+            for unit in env.units:
+                if isinstance(unit, cls):
+                    q_preds[unit] = cls_preds[i]
+                    i += 1
+        return q_preds
 
+    def explore_step(self, env: BattlecodeEnv, epsilon=0.01):
+        """Runs epsilon-greedy exploration: steps env, returning actions and reward"""
+
+        preds = {}
+        actions = []
+        for unit, action_mask in env.iter_agents():
+            if random.random() < epsilon:
+                action = random.choice(np.arange(unit.action_space.n)[action_mask])
+            else:
+                if unit not in preds or random.random() < self.obs_refresh_prob:
+                    preds = self.get_q_preds(env)
+                if unit.team == 0:
+                    preds[unit][~action_mask] = -1e8
+                    action = torch.argmax(preds[unit]).item()
+                else:
+                    preds[unit][~action_mask] = 1e8
+                    action = torch.argmin(preds[unit]).item()
+            actions.append(action)
+            env.step(unit, action)
         reward = env.get_team_reward()
-        env.push_round_metrics(self.logger)
-        if return_obs:
-            return observations, actions, reward
         return actions, reward
 
     def forward(
-        self, env_state: BattlecodeEnv, actions: list[int]
+        self,
+        env: BattlecodeEnv,
+        actions: list[int],
     ) -> tuple[torch.Tensor, BattlecodeEnv]:
-        x = self.conv1(torch.tensor(env_state.global_observation()))
+        """Computes Q-values given actions"""
+        x = self.conv1(torch.tensor(env.global_observation()))
         x = self.squeeze_and_excite(x)[:, None, None] * x
         weights = F.softplus(self.head(x).squeeze(0))  # (1, H, W), then (H, W)
-        assert weights.shape == env_state.rubble.shape
 
         global_q = torch.tensor(0.0)
-        curr_env = copy.deepcopy(env_state)
-        for i, (bot, obs, _) in enumerate(curr_env.iter_agents()):
-            action_qs = self.utility_nets[bot.__class__.__name__](torch.tensor(obs))
+        preds = {}
+        for i, (unit, action_mask) in enumerate(env.iter_agents()):
+            if unit not in preds:
+                preds = self.get_q_preds(env)
+            local_q = preds[unit][actions[i]]
+            global_q += weights[unit.y, unit.x] * local_q  # linear QMIX
+            env.step(unit, actions[i])
 
-            local_q = action_qs[actions[i]]
-            global_q += weights[bot.y, bot.x] * local_q  # linear QMIX
-            curr_env.step(bot, actions[i])
-
-        return global_q, curr_env
+        return global_q, env
 
     # def forward_precomputed(self, env_state, observations, actions):
     #     x = self.conv1(torch.tensor(env_state.global_observation()))
@@ -202,7 +210,9 @@ class Trainer:
                 loss = torch.tensor(0.0)
                 for _ in range(self.minibatch_size):
                     transition = random.choice(self.replay_buffer)
-                    y, next_state = self.model(transition.env_state, transition.actions)
+                    y, next_state = self.model(
+                        copy.deepcopy(transition.env_state), transition.actions
+                    )
 
                     if next_state.done:
                         target = transition.reward
