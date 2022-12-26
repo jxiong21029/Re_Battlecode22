@@ -37,7 +37,7 @@ class BattlecodeEnv:
         self.gold_reward_shaping_factor = gold_reward_shaping_factor
         self.reward_shaping_depends_hp = reward_shaping_depends_hp
         self.reward_scaling_factor = reward_scaling_factor
-        self.rng = random.Random()
+        self.rng = None
 
         self.height = None
         self.width = None
@@ -66,8 +66,11 @@ class BattlecodeEnv:
             ):
                 yield yld
 
-    def reset(self):
+    def reset(self, seed=None):
+        self.rng = random.Random(seed)
+
         filenames = glob.glob("Re_Battlecode22/maps/data/*.npz")
+        filenames = [a for a in filenames if "maptestsmall" not in a]
         selected_file = (
             self.rng.choice(filenames)
             if self.map_selection is None
@@ -94,21 +97,41 @@ class BattlecodeEnv:
             self.pos_map[(unit.y, unit.x)] = unit
         self.archon_counts = [len(self.units) // 2, len(self.units) // 2]
         self.prev_value_differential = 0
-        self.episode_metrics = defaultdict(float)
+        self.episode_metrics = {
+            "lead_mined": 0,
+            "dmg_dealt": 0,
+            "units_killed": 0,
+            "spawned_miner": 0,
+            "spawned_builder": 0,
+            "spawned_soldier": 0,
+            "spawned_sage": 0,
+            "spawned_laboratory": 0,
+        }
         self.done = False
 
+    # TODO: fix archon observations
     def observations(self):
         if self.cached_obs is not None:
             return self.cached_obs
-        ret = np.zeros((7, self.height, self.width), dtype=np.float32)
-        ret[0] = self.rubble / 100
+
+        counts = defaultdict(lambda: [0, 0])
         for unit in self.units:
-            ret[1 + unit.team, unit.y, unit.x] = np.log1p(unit.curr_hp) / 2
-            ret[3 + unit.team, unit.y, unit.x] = 1 if isinstance(unit, Building) else 0
-        ret[5] = self.lead / 64
-        ret[6] = self.gold / 16
-        self.cached_obs = ret
-        return ret
+            counts[unit.__class__.__name__.lower()][unit.team] += 1
+
+        i = 0
+        j = 0
+        archon_obs = np.zeros((2, 11), dtype=np.float32)
+        archon_obs
+
+        tile_obs = np.zeros((7, self.height, self.width), dtype=np.float32)
+        tile_obs[0] = self.rubble / 100
+        for unit in self.units:
+            tile_obs[1 + unit.team, unit.y, unit.x] = np.log1p(unit.curr_hp) / 2
+            tile_obs[3 + unit.team, unit.y, unit.x] = 1 if isinstance(unit, Building) else 0
+        tile_obs[5] = self.lead / 64
+        tile_obs[6] = self.gold / 16
+        self.cached_obs = tile_obs
+        return tile_obs
 
     def state(self):
         # timestep, lead bank, gold bank for both teams, map size, x, y coordinate (9)
@@ -239,9 +262,9 @@ class BattlecodeEnv:
 
             if bot.act_cd < 10:
                 lead_cost = bot.lead_ratio(
-                    len(list(self.nearby_bots(bot.y, bot.x, bot.vis_rad, bot.team)))
+                    len(list(self.nearby_bots(bot.y, bot.x, bot.vis_rad, bot.team))) - 1
                 )
-                ret[1] = lead_cost >= self.lead_banks[bot.team]
+                ret[1] = self.lead_banks[bot.team] >= lead_cost
         elif isinstance(bot, Watchtower):
             return NotImplementedError  # TODO
 
@@ -323,6 +346,8 @@ class BattlecodeEnv:
         self.pos_map[pos] = new_unit
         self.lead_banks[team] -= new_unit.lead_value
         self.gold_banks[team] -= new_unit.gold_value
+
+        self.episode_metrics[f"spawned_{unit_class.__name__.lower()}"] += 1
 
     def step(self, bot, action):
         if not isinstance(bot, Building) and 1 <= action <= 8:
@@ -430,18 +455,15 @@ class BattlecodeEnv:
             new_unit_class = unit_class_map[action]
             self.spawn(new_unit_class, chosen_pos, bot.team)
             bot.add_act_cost(self.rubble[bot.y, bot.x])
-            self.episode_metrics[f"spawned_{new_unit_class.__name__.lower()}"] += 1
 
         # auto-transmute
         if isinstance(bot, Laboratory) and action == 1:
-            nearby = 0
-            for (dy, dx) in within_radius(bot.vis_rad):
-                y, x = bot.y + dy, bot.x + dx
-                if (y, x) in self.pos_map and self.pos_map[y, x].team == bot.team:
-                    nearby += 1
-
-            lead_cost = bot.lead_ratio(nearby)
-            assert self.lead_banks[bot.team] >= lead_cost
+            lead_cost = bot.lead_ratio(
+                len(list(self.nearby_bots(bot.y, bot.x, bot.vis_rad, bot.team))) - 1
+            )
+            assert (
+                self.lead_banks[bot.team] >= lead_cost
+            ), f"{self.lead_banks[bot.team]}, {lead_cost}"
             self.lead_banks[bot.team] -= lead_cost
             self.gold_banks[bot.team] += 1
             bot.add_act_cost(self.rubble[(bot.y, bot.x)])
@@ -506,7 +528,11 @@ class BattlecodeEnv:
     def get_team_reward(self):
         assert self.curr_idx is None  # not in middle of units pass
 
-        value_differential = 0
+        value_differential = self.lead_banks[0] - self.lead_banks[1]
+        value_differential += self.gold_reward_shaping_factor * (
+            self.gold_banks[0] - self.gold_banks[1]
+        )
+
         for unit in self.units:
             unit_value = (
                 unit.lead_value + self.gold_reward_shaping_factor * unit.gold_value
@@ -527,6 +553,3 @@ class BattlecodeEnv:
         # TODO win reward
 
         return ret
-
-    def push_episode_metrics(self, logger):
-        logger.push(self.episode_metrics)

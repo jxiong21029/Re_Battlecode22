@@ -146,7 +146,9 @@ class Logger:
                 )
             else:
                 name = k
-                ax.plot(x, v)
+                (line,) = ax.plot(x, v)
+            ax.scatter(x, v, color=line.get_color())
+
             fig.suptitle(name)
             fig.savefig(os.path.join(dirname, name))
             plt.close(fig)

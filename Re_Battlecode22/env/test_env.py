@@ -24,11 +24,11 @@ def make_dense_env():
     env.gold_banks = [9999, 9999]
     for cls in (Miner, Builder, Soldier, Sage, Laboratory):
         for _ in range(10):
-            y = random.randrange(0, env.height)
-            x = random.randrange(0, env.width)
+            y = random.randrange(env.height)
+            x = random.randrange(env.width)
             if (y, x) not in env.pos_map:
                 env.spawn(cls, (y, x), random.randint(0, 1))
-    env.lead_banks = [random.randint(0, 100), random.randint(0, 100)]
+    env.lead_banks = [random.randint(0, 500), random.randint(0, 500)]
     env.gold_banks = [random.randint(0, 100), random.randint(0, 100)]
     return env
 
@@ -105,7 +105,7 @@ def test_action_mask(test_envs: list[BattlecodeEnv]):
     for env in test_envs:
         stored = copy.deepcopy(env)
 
-        idx = [random.randint(0, len(env.units) - 1) for _ in range(50)]
+        idx = [random.randrange(len(env.units)) for _ in range(50)]
         for i in idx:
             env = copy.deepcopy(stored)
             for j, (unit, action_mask) in enumerate(env.iter_agents()):
