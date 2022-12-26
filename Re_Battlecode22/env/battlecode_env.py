@@ -25,7 +25,7 @@ class BattlecodeEnv:
         self,
         map_selection: str | None = None,
         max_episode_length: int = 2000,
-        augment_obs: bool = False,  # TODO
+        # augment_obs: bool = False,  # TODO
         gold_reward_shaping_factor: float = 5.0,
         reward_shaping_depends_hp: bool = True,
         reward_scaling_factor: float = 0.1,
@@ -33,7 +33,7 @@ class BattlecodeEnv:
         self.map_selection = map_selection
         self.max_episode_length = max_episode_length
         self.map_name = None
-        self.augment_obs = augment_obs
+        # self.augment_obs = augment_obs
         self.gold_reward_shaping_factor = gold_reward_shaping_factor
         self.reward_shaping_depends_hp = reward_shaping_depends_hp
         self.reward_scaling_factor = reward_scaling_factor
@@ -53,6 +53,7 @@ class BattlecodeEnv:
         self.done = None
         self.curr_idx = None
         self.prev_value_differential = None
+        self.cached_obs = None
         self.episode_metrics = None
 
     def in_bounds(self, y, x):
@@ -97,13 +98,16 @@ class BattlecodeEnv:
         self.done = False
 
     def observations(self):
-        ret = np.zeros((7, self.height, self.width))
+        if self.cached_obs is not None:
+            return self.cached_obs
+        ret = np.zeros((7, self.height, self.width), dtype=np.float32)
         ret[0] = self.rubble / 100
         for unit in self.units:
             ret[1 + unit.team, unit.y, unit.x] = np.log1p(unit.curr_hp) / 2
             ret[3 + unit.team, unit.y, unit.x] = 1 if isinstance(unit, Building) else 0
         ret[5] = self.lead / 64
         ret[6] = self.gold / 16
+        self.cached_obs = ret
         return ret
 
     def state(self):
@@ -248,6 +252,8 @@ class BattlecodeEnv:
         dy, dx = DIRECTIONS[action]
         assert (bot.y + dy, bot.x + dx) not in self.pos_map
         assert self.in_bounds(bot.y + dy, bot.x + dx)
+
+        self.cached_obs = None
         del self.pos_map[(bot.y, bot.x)]
         bot.y += dy
         bot.x += dx
@@ -264,6 +270,7 @@ class BattlecodeEnv:
 
         assert bot.act_cd < 10
 
+        self.cached_obs = None
         bot.add_act_cost(self.rubble[bot.y, bot.x])
 
         old_hp = target.curr_hp
@@ -292,6 +299,7 @@ class BattlecodeEnv:
         assert isinstance(bot, Builder)
         assert self.lead[bot.y, bot.x] == 0  # heuristic constraint
 
+        self.cached_obs = None
         self.lead[bot.y, bot.x] += int(0.2 * bot.lead_value)
         idx = self.units.index(bot)
 
@@ -304,9 +312,12 @@ class BattlecodeEnv:
         assert pos not in self.pos_map
         assert self.in_bounds(pos[0], pos[1])
         assert isinstance(pos, tuple)
-        assert self.lead_banks[team] >= unit_class.lead_value
+        assert (
+            self.lead_banks[team] >= unit_class.lead_value
+        ), f"{self.lead_banks[team]} {unit_class.__name__}"
         assert self.gold_banks[team] >= unit_class.gold_value
 
+        self.cached_obs = None
         new_unit = unit_class(y=pos[0], x=pos[1], team=team)
         self.units.append(new_unit)
         self.pos_map[pos] = new_unit
@@ -326,6 +337,7 @@ class BattlecodeEnv:
                 and self.lead[pos := (bot.y + dy, bot.x + dx)] >= 1
             ]
             while available_lead and bot.act_cd < 10:
+                self.cached_obs = None
                 selected = self.rng.choice(available_lead)
                 self.lead[selected] -= 1
                 self.lead_banks[bot.team] += 1
@@ -348,6 +360,7 @@ class BattlecodeEnv:
                 if target.curr_hp < target.max_hp and target != bot
             ]
             if targets:
+                self.cached_obs = None
                 selected = self.rng.choice(targets)
                 self.attack(bot, selected)
 
@@ -428,6 +441,7 @@ class BattlecodeEnv:
                     nearby += 1
 
             lead_cost = bot.lead_ratio(nearby)
+            assert self.lead_banks[bot.team] >= lead_cost
             self.lead_banks[bot.team] -= lead_cost
             self.gold_banks[bot.team] += 1
             bot.add_act_cost(self.rubble[(bot.y, bot.x)])
@@ -448,7 +462,10 @@ class BattlecodeEnv:
 
             # temporary heuristic behavior, not policy-controlled
             if isinstance(bot, Laboratory):
-                self.step(bot, action=1)
+                if self.legal_action_mask(bot)[1]:
+                    self.step(bot, action=1)
+                else:
+                    self.step(bot, action=0)
                 self.curr_idx += 1
                 continue
 
@@ -458,6 +475,7 @@ class BattlecodeEnv:
 
             self.curr_idx += 1
         self.curr_idx = None
+        self.cached_obs = None
 
         for bot in self.units:
             bot.move_cd = max(0, bot.move_cd - 10)

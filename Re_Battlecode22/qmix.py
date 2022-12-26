@@ -1,4 +1,5 @@
 import copy
+import math
 import random
 from dataclasses import dataclass
 
@@ -19,27 +20,47 @@ class Transition:
     reward: float
 
 
+class MaskedConv(nn.Conv2d):
+    def __init__(self, unit_cls, device=None):
+        ksize = 1 + 2 * math.floor(math.sqrt(unit_cls.vis_rad))
+        super().__init__(
+            in_channels=7,
+            out_channels=unit_cls.action_space.n,
+            kernel_size=ksize,
+            padding="same",
+            device=device,
+        )
+        mask = torch.ones((unit_cls.action_space.n, 7, ksize, ksize))
+        mid = ksize // 2
+        for row in range(ksize):
+            for col in range(ksize):
+                if (mid - row) ** 2 + (mid - col) ** 2 > unit_cls.vis_rad:
+                    mask[:, :, row, col] = 0
+        self.register_buffer("mask", mask)
+
+    def forward(self, x):
+        return self._conv_forward(x, self.mask * self.weight, self.bias)
+
+
 class QMixAgents(nn.Module):
     def __init__(
         self,
         obs_refresh_prob=0.03,
-        augment_inputs=True,
+        # augment_inputs=True,
         augment_targets=True,
         target_augmentations=4,
         logger=None,
     ):
         super().__init__()
         self.obs_refresh_prob = obs_refresh_prob
-        self.augment_inputs = augment_inputs  # TODO augmentations
+        # self.augment_inputs = augment_inputs  # TODO augmentations
         self.augment_targets = augment_targets
         self.target_augmentations = target_augmentations
         self.logger = logger
 
-        self.utility_nets = nn.ModuleDict(
+        self.local_qnets = nn.ModuleDict(
             {
-                cls.__name__: nn.Linear(
-                    cls.observation_space.shape[0], cls.action_space.n
-                )
+                cls.__name__: MaskedConv(cls)
                 for cls in (Miner, Builder, Soldier, Sage, Archon)
             }
         )
@@ -62,37 +83,26 @@ class QMixAgents(nn.Module):
             nn.Conv2d(16, 1, kernel_size=1),
         )
 
-    def get_q_preds(self, env):
-        obses: dict[type, np.ndarray] = env.observations()
-        q_preds = {}
-        for cls in obses.keys():
-            cls_preds = self.utility_nets[cls.__name__](torch.tensor(obses[cls]))
-            i = 0
-            for unit in env.units:
-                if isinstance(unit, cls):
-                    q_preds[unit] = cls_preds[i]
-                    i += 1
-        return q_preds
-
     def explore_step(self, env: BattlecodeEnv, epsilon=0.01):
         """Runs epsilon-greedy exploration: steps env, returning actions and reward"""
 
-        preds = {}
         actions = []
         for unit, action_mask in env.iter_agents():
             if random.random() < epsilon:
                 action = random.choice(np.arange(unit.action_space.n)[action_mask])
             else:
-                if unit not in preds or random.random() < self.obs_refresh_prob:
-                    preds = self.get_q_preds(env)
+                preds = self.local_qnets[unit.__class__.__name__](
+                    torch.tensor(env.observations())
+                )[:, unit.y, unit.x]
                 if unit.team == 0:
-                    preds[unit][~action_mask] = -1e8
-                    action = torch.argmax(preds[unit]).item()
+                    preds[~action_mask] = -1e8
+                    action = torch.argmax(preds).item()
                 else:
-                    preds[unit][~action_mask] = 1e8
-                    action = torch.argmin(preds[unit]).item()
+                    preds[~action_mask] = 1e8
+                    action = torch.argmin(preds).item()
             actions.append(action)
             env.step(unit, action)
+
         reward = env.get_team_reward()
         return actions, reward
 
@@ -102,16 +112,15 @@ class QMixAgents(nn.Module):
         actions: list[int],
     ) -> tuple[torch.Tensor, BattlecodeEnv]:
         """Computes Q-values given actions"""
-        x = self.conv1(torch.tensor(env.global_observation()))
+        x = self.conv1(torch.tensor(env.state()))
         x = self.squeeze_and_excite(x)[:, None, None] * x
         weights = F.softplus(self.head(x).squeeze(0))  # (1, H, W), then (H, W)
 
         global_q = torch.tensor(0.0)
-        preds = {}
+        obs = torch.tensor(env.observations())
+        preds = {cls: self.local_qnets[cls.__name__](obs) for cls in (Miner, Builder, Soldier, Sage, Archon)}
         for i, (unit, action_mask) in enumerate(env.iter_agents()):
-            if unit not in preds:
-                preds = self.get_q_preds(env)
-            local_q = preds[unit][actions[i]]
+            local_q = preds[unit.__class__][actions[i], unit.y, unit.x]
             global_q += weights[unit.y, unit.x] * local_q  # linear QMIX
             env.step(unit, actions[i])
 
@@ -126,7 +135,7 @@ class QMixAgents(nn.Module):
     #     for i, (bot, obs, action) in enumerate(
     #         zip(env_state.units, observations, actions)
     #     ):
-    #         action_qs = self.utility_nets[bot.__class__.__name__](obs)
+    #         action_qs = self.local_qnets[bot.__class__.__name__](obs)
     #         global_q += weights[bot.y, bot.x] * action_qs[action]
     #     return global_q
 
@@ -180,6 +189,8 @@ class Trainer:
     def curr_epsilon(self):
         if self.t < self.pre_learning_steps:
             return 1
+        if self.epsilon_decrease_steps == 0:
+            return self.epsilon_min
         return max(
             self.epsilon_min,
             self.epsilon_min

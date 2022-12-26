@@ -22,7 +22,7 @@ def play(p0: QMixAgents, p1: QMixAgents | None = None):
     while not env.done:
         for bot, obs, action_mask in env.iter_agents():
             if bot.team == 0:
-                action_qs = p0.utility_nets[bot.__class__.__name__](torch.tensor(obs))
+                action_qs = p0.local_qnets[bot.__class__.__name__](torch.tensor(obs))
                 action = torch.argmax(action_qs).item()
             else:
                 assert bot.team == 1
@@ -31,7 +31,7 @@ def play(p0: QMixAgents, p1: QMixAgents | None = None):
                         np.arange(action_mask.shape[0])[action_mask]
                     )
                 else:
-                    action_qs = p1.utility_nets[bot.__class__.__name__](
+                    action_qs = p1.local_qnets[bot.__class__.__name__](
                         torch.tensor(obs)
                     )
                     action = torch.argmin(action_qs).item()
