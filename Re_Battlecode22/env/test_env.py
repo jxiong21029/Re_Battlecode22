@@ -4,11 +4,7 @@ import random
 import numpy as np
 import pytest
 
-from ..utils import symmetry_transform
-from .entities import Archon
-from .preprocess import BattlecodeEnv
-
-SEED = 69420
+from . import Archon, BattlecodeEnv, Builder, Laboratory, Miner, Sage, Soldier
 
 
 def make_sample_env(num_rounds):
@@ -21,125 +17,112 @@ def make_sample_env(num_rounds):
     return env
 
 
+def make_dense_env():
+    env = BattlecodeEnv()
+    env.reset()
+    env.lead_banks = [9999, 9999]
+    env.gold_banks = [9999, 9999]
+    for cls in (Miner, Builder, Soldier, Sage, Laboratory):
+        for _ in range(10):
+            y = random.randrange(0, env.height)
+            x = random.randrange(0, env.width)
+            if (y, x) not in env.pos_map:
+                env.spawn(cls, (y, x), random.randint(0, 1))
+    env.lead_banks = [random.randint(0, 100), random.randint(0, 100)]
+    env.gold_banks = [random.randint(0, 100), random.randint(0, 100)]
+    return env
+
+
 @pytest.fixture
-def sample_envs():
-    random.seed(0xBEEF)
+def test_envs():
+    random.seed(42)
 
     ret = [BattlecodeEnv()]
     ret[0].reset()
 
-    for num_rounds in (1, 5, 5, 5, 100, 100, 100, 100):
+    for num_rounds in (1, 5, 100, 100):
         ret.append(make_sample_env(num_rounds))
+    for _ in range(5):
+        ret.append(make_dense_env())
     return ret
 
 
-def test_observations():
-    for _ in range(10):
-        env = make_sample_env(100)
-        env.observations()
+def test_observations(test_envs: list[BattlecodeEnv]):
+    cnt = 0
+    for env in test_envs:
+        obs = env.observations()
+        for unit in env.units:
+            if unit.team == 0:
+                assert np.isclose(obs[1, unit.y, unit.x], np.log1p(unit.curr_hp) / 2)
+                assert obs[2, unit.y, unit.x] == 0
+
+                if isinstance(unit, (Archon, Laboratory)):
+                    cnt += 1
+                    assert obs[3, unit.y, unit.x] == 1
+                else:
+                    assert obs[3, unit.y, unit.x] == 0
+                assert obs[4, unit.y, unit.x] == 0
+            else:
+                assert obs[1, unit.y, unit.x] == 0
+                assert np.isclose(obs[2, unit.y, unit.x], np.log1p(unit.curr_hp) / 2)
+
+                if isinstance(unit, (Archon, Laboratory)):
+                    assert obs[4, unit.y, unit.x] == 1
+                else:
+                    assert obs[4, unit.y, unit.x] == 0
+                assert obs[3, unit.y, unit.x] == 0
+    assert cnt
 
 
-# def test_symmetry_transform():
-#     starty, startx = 2, 3
-#     expected_results = {
-#         (2, 3),
-#         (3, 2),
-#         (1, 3),
-#         (3, 1),
-#         (2, 0),
-#         (0, 2),
-#         (1, 0),
-#         (0, 1),
-#     }
-#     actual_results = set()
-#     for symmetry in range(8):
-#         result = symmetry_transform(starty, startx, symmetry, 4, 4)
-#         actual_results.add(result)
-#         assert result == symmetry_transform(starty, startx, symmetry + 8, 4, 4)
-#     assert expected_results == actual_results
-#
-#
-# def test_terrain(sample_envs):
-#     for env in sample_envs:
-#         assert (0 <= env.rubble).all() and (env.rubble <= 100).all()
-#
-#
-# def test_archon_counts(sample_envs):
-#     for env in sample_envs:
-#         for team in (0, 1):
-#             assert (
-#                 sum(
-#                     1
-#                     for unit in env.units
-#                     if unit.team == team and isinstance(unit, Archon)
-#                 )
-#                 == env.archon_counts[team]
-#             )
-#
-#
-# def test_global_symmetry_yflip(sample_envs):
-#     for env in sample_envs:
-#         env: BattlecodeEnv
-#         yflip = copy.deepcopy(env)
-#
-#         yflip.rubble = yflip.rubble[::-1]
-#         yflip.lead = yflip.lead[::-1]
-#         yflip.gold = yflip.gold[::-1]
-#         for unit in yflip.units:
-#             unit.y = yflip.rubble.shape[0] - unit.y - 1
-#         yflip.pos_map = {(unit.y, unit.x): unit for unit in yflip.units}
-#
-#         orig = env.global_observation(symmetry=1)
-#         copied = yflip.global_observation(symmetry=0)
-#         for i in range(orig.shape[0]):
-#             if i == 7:
-#                 continue
-#             assert np.isclose(orig[i], copied[i]).all(), str(i)
-#
-#
-# def test_global_symmetry_tranpose(sample_envs):
-#     for env in sample_envs:
-#         env: BattlecodeEnv
-#         tranposed = copy.deepcopy(env)
-#
-#         tranposed.rubble = tranposed.rubble.transpose()
-#         tranposed.lead = tranposed.lead.transpose()
-#         tranposed.gold = tranposed.gold.transpose()
-#         for unit in tranposed.units:
-#             unit.x, unit.y = unit.y, unit.x
-#         tranposed.pos_map = {(unit.y, unit.x): unit for unit in tranposed.units}
-#
-#         orig = env.global_observation(symmetry=4)
-#         copied = tranposed.global_observation(symmetry=0)
-#         for i in range(orig.shape[0]):
-#             assert np.isclose(orig[i], copied[i]).all(), str(i)
-#
-#
-# def test_global_symmetry_teamflip(sample_envs):
-#     for env in sample_envs:
-#         env: BattlecodeEnv
-#         teamflip = copy.deepcopy(env)
-#
-#         for unit in teamflip.units:
-#             unit.team = 1 - unit.team
-#         teamflip.lead_banks = teamflip.lead_banks[::-1]
-#         teamflip.gold_banks = teamflip.gold_banks[::-1]
-#
-#         orig = env.global_observation(symmetry=8)
-#         copied = teamflip.global_observation(symmetry=0)
-#         for i in range(orig.shape[0]):
-#             assert np.isclose(orig[i], copied[i]).all(), str(i)
-#
-#
-# def test_pos_map(sample_envs: list[BattlecodeEnv]):
-#     for env in sample_envs:
-#         for unit in env.units:
-#             assert env.pos_map[(unit.y, unit.x)] is unit, breakpoint()
-#         for pos, unit in env.pos_map.items():
-#             assert pos == (unit.y, unit.x)
-#
-#
-# def test_unsigned_problems(sample_envs: list[BattlecodeEnv]):
-#     for env in sample_envs:
-#         assert (env.lead <= 200).all()
-#         assert (env.gold <= 200).all()
+def test_generation(test_envs: list[BattlecodeEnv]):
+    for env in test_envs:
+        assert (0 <= env.rubble).all() and (env.rubble <= 100).all()
+        assert env.lead.min() >= 0 and env.gold.min() >= 0
+
+
+def test_archon_counts(test_envs: list[BattlecodeEnv]):
+    for env in test_envs:
+        for team in (0, 1):
+            assert (
+                sum(
+                    1
+                    for unit in env.units
+                    if unit.team == team and isinstance(unit, Archon)
+                )
+                == env.archon_counts[team]
+            )
+
+
+def test_pos_map(test_envs: list[BattlecodeEnv]):
+    for env in test_envs:
+        for unit in env.units:
+            assert env.pos_map[(unit.y, unit.x)] is unit, breakpoint()
+        for pos, unit in env.pos_map.items():
+            assert pos == (unit.y, unit.x)
+
+
+def test_action_mask(test_envs: list[BattlecodeEnv]):
+    for env in test_envs:
+        stored = copy.deepcopy(env)
+
+        idx = [random.randint(0, len(env.units) - 1) for _ in range(50)]
+        for i in idx:
+            env = copy.deepcopy(stored)
+            for j, (unit, action_mask) in enumerate(env.iter_agents()):
+                if i == j and not np.all(action_mask):
+                    illegal_action = random.choice(
+                        np.arange(unit.action_space.n)[~action_mask]
+                    )
+                    with pytest.raises(AssertionError):
+                        env.step(unit, illegal_action)
+                        print(">>>>>", unit, illegal_action)
+                else:
+                    legal_action = random.choice(
+                        np.arange(unit.action_space.n)[action_mask]
+                    )
+                    env.step(unit, legal_action)
+
+
+def test_state(test_envs: list[BattlecodeEnv]):
+    for env in test_envs:
+        assert np.abs(env.state()).max() < 10

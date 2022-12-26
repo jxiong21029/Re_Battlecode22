@@ -20,7 +20,7 @@ from .entities import (
 )
 
 
-class BattlecodeEngine:
+class BattlecodeEnv:
     def __init__(
         self,
         map_selection: str | None = None,
@@ -95,6 +95,87 @@ class BattlecodeEngine:
         self.prev_value_differential = 0
         self.episode_metrics = defaultdict(float)
         self.done = False
+
+    def observations(self):
+        ret = np.zeros((7, self.height, self.width))
+        ret[0] = self.rubble / 100
+        for unit in self.units:
+            ret[1 + unit.team, unit.y, unit.x] = np.log1p(unit.curr_hp) / 2
+            ret[3 + unit.team, unit.y, unit.x] = 1 if isinstance(unit, Building) else 0
+        ret[5] = self.lead / 64
+        ret[6] = self.gold / 16
+        return ret
+
+    def state(self):
+        # timestep, lead bank, gold bank for both teams, map size, x, y coordinate (9)
+        # rubble, lead, gold  (3)
+        # ally type one-hot, HP, move_cd, act_cd (6 + 3 = 9)
+        # same for opponent (9)
+        # SUM: 9 + 3 + 9 + 9 = 30
+        symmetry = 0  # TODO
+        swapax = 0
+
+        ret = np.zeros(
+            (30, self.rubble.shape[0], self.rubble.shape[1]),
+            dtype=np.float32,
+        )
+
+        # global information:
+        # timestep, lead+gold banks, map size.
+        ret[0] = self.t / 2000
+        ret[1:3] = (
+            np.array(
+                self.lead_banks if symmetry < 8 else self.lead_banks[::-1]
+            ).reshape((-1, 1, 1))
+            / 256
+        )
+        ret[3:5] = (
+            np.array(
+                self.gold_banks if symmetry < 8 else self.gold_banks[::-1]
+            ).reshape((-1, 1, 1))
+            / 64
+        )
+        ret[5:7] = (
+            np.array(
+                self.rubble.shape if not swapax else self.rubble.shape[::-1]
+            ).reshape((-1, 1, 1))
+            / 60
+        )
+
+        # each cell stores own y and x position relative to origin
+        ret[7 + swapax] = (
+            np.arange(self.rubble.shape[0]) - self.rubble.shape[0] / 2 + 0.5
+        ).reshape((-1, 1)) / 30
+        ret[8 - swapax] = (
+            np.arange(self.rubble.shape[1]) - self.rubble.shape[1] / 2 + 0.5
+        ).reshape((1, -1)) / 30
+
+        # terrain: rubble, lead, gold
+        ret[9] = self.rubble / 100
+        ret[10] = self.lead / 128
+        ret[11] = self.gold / 32
+
+        # units: ally HP, type one-hot, move_cd, act_cd
+        unit_type_map = {
+            Miner: 0,
+            Builder: 1,
+            Soldier: 2,
+            Sage: 3,
+            Archon: 4,
+            Laboratory: 5,
+        }
+        for y in range(self.rubble.shape[0]):
+            for x in range(self.rubble.shape[1]):
+                if (y, x) not in self.pos_map:
+                    continue
+                unit: Entity = self.pos_map[(y, x)]
+                unit_type_id = unit_type_map[unit.__class__]
+                ut = unit.team if symmetry < 8 else 1 - unit.team
+                ret[12 + 2 * unit_type_id + ut, y, x] = 1
+                ret[24 + ut, y, x] = unit.curr_hp / 512
+                ret[26 + ut, y, x] = unit.move_cd / 100
+                ret[28 + ut, y, x] = unit.act_cd / 100
+        return ret
 
     def legal_action_mask(self, bot):
         ret = np.zeros(bot.action_space.n, dtype=bool)
@@ -209,6 +290,8 @@ class BattlecodeEngine:
 
     def disintegrate(self, bot):
         assert isinstance(bot, Builder)
+        assert self.lead[bot.y, bot.x] == 0  # heuristic constraint
+
         self.lead[bot.y, bot.x] += int(0.2 * bot.lead_value)
         idx = self.units.index(bot)
 
@@ -221,49 +304,14 @@ class BattlecodeEngine:
         assert pos not in self.pos_map
         assert self.in_bounds(pos[0], pos[1])
         assert isinstance(pos, tuple)
+        assert self.lead_banks[team] >= unit_class.lead_value
+        assert self.gold_banks[team] >= unit_class.gold_value
 
         new_unit = unit_class(y=pos[0], x=pos[1], team=team)
         self.units.append(new_unit)
         self.pos_map[pos] = new_unit
         self.lead_banks[team] -= new_unit.lead_value
         self.gold_banks[team] -= new_unit.gold_value
-
-    def iter_agents(
-        self,
-    ) -> typing.Generator[tuple[Entity, np.ndarray], None, None]:
-        """Yields Entity objects, observations, and action masks"""
-        assert self.curr_idx is None
-        assert self.t < self.max_episode_length
-
-        self.curr_idx = 0
-        while self.curr_idx < len(self.units):
-            bot = self.units[self.curr_idx]
-
-            # temporary heuristic behavior, not policy-controlled
-            if isinstance(bot, Laboratory):
-                self.step(bot, action=1)
-                self.curr_idx += 1
-                continue
-
-            assert not isinstance(bot, Watchtower)  # TODO
-
-            yield bot, self.legal_action_mask(bot)
-
-            self.curr_idx += 1
-        self.curr_idx = None
-
-        for bot in self.units:
-            bot.move_cd = max(0, bot.move_cd - 10)
-            bot.act_cd = max(0, bot.act_cd - 10)
-
-        self.t += 1
-        if self.t == self.max_episode_length:
-            self.done = True
-        else:
-            self.lead_banks[0] += 2
-            self.lead_banks[1] += 2
-            if self.t % 20 == 0:
-                self.lead[self.lead > 0] += 5
 
     def step(self, bot, action):
         if not isinstance(bot, Building) and 1 <= action <= 8:
@@ -342,6 +390,7 @@ class BattlecodeEngine:
 
         # droid creation
         if isinstance(bot, Archon) and action != 0:
+            assert bot.act_cd < 10
             map_center = (self.height // 2, self.width // 2)
             all_spawn_pos = []
             good_spawn_pos = []
@@ -355,6 +404,7 @@ class BattlecodeEngine:
                     ) + abs(bot.x - map_center[1]):
                         good_spawn_pos.append((y, x))
 
+            assert all_spawn_pos
             chosen_pos = self.rng.choice(
                 good_spawn_pos if good_spawn_pos else all_spawn_pos
             )
@@ -384,6 +434,43 @@ class BattlecodeEngine:
 
         if min(self.archon_counts) == 0:
             self.done = True
+
+    def iter_agents(
+        self,
+    ) -> typing.Generator[tuple[Entity, np.ndarray], None, None]:
+        """Yields Entity objects and action masks"""
+        assert self.curr_idx is None
+        assert self.t < self.max_episode_length
+
+        self.curr_idx = 0
+        while self.curr_idx < len(self.units):
+            bot = self.units[self.curr_idx]
+
+            # temporary heuristic behavior, not policy-controlled
+            if isinstance(bot, Laboratory):
+                self.step(bot, action=1)
+                self.curr_idx += 1
+                continue
+
+            assert not isinstance(bot, Watchtower)  # TODO
+
+            yield bot, self.legal_action_mask(bot)
+
+            self.curr_idx += 1
+        self.curr_idx = None
+
+        for bot in self.units:
+            bot.move_cd = max(0, bot.move_cd - 10)
+            bot.act_cd = max(0, bot.act_cd - 10)
+
+        self.t += 1
+        if self.t == self.max_episode_length:
+            self.done = True
+        else:
+            self.lead_banks[0] += 2
+            self.lead_banks[1] += 2
+            if self.t % 20 == 0:
+                self.lead[self.lead > 0] += 5
 
     def winner(self):
         if self.archon_counts[0] != self.archon_counts[1]:
