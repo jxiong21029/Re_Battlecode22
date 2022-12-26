@@ -7,11 +7,11 @@ from collections import defaultdict
 import numpy as np
 
 from ..utils import DIRECTIONS, within_radius
-from .entities import (
+from .units import (
     Archon,
     Builder,
     Building,
-    Entity,
+    Unit,
     Laboratory,
     Miner,
     Sage,
@@ -47,19 +47,19 @@ class BattlecodeEnv:
         self.t = None
         self.lead_banks = None
         self.gold_banks = None
-        self.units: list[Entity] = None
+        self.units: list[Unit] = None
         self.pos_map = None
         self.archon_counts = None
         self.done = None
         self.curr_idx = None
         self.prev_value_differential = None
-        self.cached_obs = None
+        self.cached_tiles = None
         self.episode_metrics = None
 
     def in_bounds(self, y, x):
         return 0 <= y < self.height and 0 <= x < self.width
 
-    def nearby_bots(self, y, x, radsq, team=None, prev_move: int = 0):
+    def nearby_units(self, y, x, radsq, team=None, prev_move: int = 0):
         for (dy, dx) in within_radius(radsq, prev_move=prev_move):
             if (y + dy, x + dx) in self.pos_map and (
                 (yld := self.pos_map[(y + dy, x + dx)]).team == team or team is None
@@ -108,6 +108,10 @@ class BattlecodeEnv:
             "spawned_laboratory": 0,
         }
         self.done = False
+
+    def observe(self, unit: Unit):
+        pass
+
 
     # TODO: fix archon observations
     def observations(self):
@@ -195,7 +199,7 @@ class BattlecodeEnv:
             for x in range(self.rubble.shape[1]):
                 if (y, x) not in self.pos_map:
                     continue
-                unit: Entity = self.pos_map[(y, x)]
+                unit: Unit = self.pos_map[(y, x)]
                 unit_type_id = unit_type_map[unit.__class__]
                 ut = unit.team if symmetry < 8 else 1 - unit.team
                 ret[12 + 2 * unit_type_id + ut, y, x] = 1
@@ -204,100 +208,100 @@ class BattlecodeEnv:
                 ret[28 + ut, y, x] = unit.act_cd / 100
         return ret
 
-    def legal_action_mask(self, bot):
-        ret = np.zeros(bot.action_space.n, dtype=bool)
+    def legal_action_mask(self, unit):
+        ret = np.zeros(unit.action_space.n, dtype=bool)
 
         ret[0] = True
-        if not isinstance(bot, Building):
-            # move actions: [0, 8] inclusive for all bots
+        if not isinstance(unit, Building):
+            # move actions: [0, 8] inclusive for all units
             for i, (dy, dx) in enumerate(DIRECTIONS):  # TODO action mask symmetry
                 if i == 0:
                     continue
                 elif (
-                    bot.move_cd < 10
-                    and self.in_bounds(bot.y + dy, bot.x + dx)
-                    and (bot.y + dy, bot.x + dx) not in self.pos_map
+                    unit.move_cd < 10
+                    and self.in_bounds(unit.y + dy, unit.x + dx)
+                    and (unit.y + dy, unit.x + dx) not in self.pos_map
                 ):
                     ret[i] = True
 
         adj_available = False
         for dy, dx in DIRECTIONS[1:]:
             if (
-                self.in_bounds(bot.y + dy, bot.x + dx)
-                and (bot.y + dy, bot.x + dx) not in self.pos_map
+                self.in_bounds(unit.y + dy, unit.x + dx)
+                and (unit.y + dy, unit.x + dx) not in self.pos_map
             ):
                 adj_available = True
                 break
 
-        if isinstance(bot, Builder):
+        if isinstance(unit, Builder):
             assert ret.shape == (11,)
             if (
-                self.lead_banks[bot.team] >= Laboratory.lead_value
-                and bot.act_cd < 10
+                self.lead_banks[unit.team] >= Laboratory.lead_value
+                and unit.act_cd < 10
                 and adj_available
             ):
                 ret[9] = True
-            if self.lead[bot.y, bot.x] == 0:
+            if self.lead[unit.y, unit.x] == 0:
                 ret[10] = True  # disintegrate for lead farm
-        elif isinstance(bot, (Soldier, Sage)):
+        elif isinstance(unit, (Soldier, Sage)):
             assert ret.shape == (9,)
             pass  # TODO attack actions, eventually
-        elif isinstance(bot, Archon):
+        elif isinstance(unit, Archon):
             assert ret.shape == (4,)
             # TODO support archon movement (some maps put archons on rubble)
             # [repair / idle, spawn miner, spawn builder, spawn combat]
-            if bot.act_cd < 10:
+            if unit.act_cd < 10:
                 ret[1] = adj_available and (
-                    self.lead_banks[bot.team] >= Miner.lead_value
+                    self.lead_banks[unit.team] >= Miner.lead_value
                 )
                 ret[2] = adj_available and (
-                    self.lead_banks[bot.team] >= Builder.lead_value
+                    self.lead_banks[unit.team] >= Builder.lead_value
                 )
                 ret[3] = adj_available and (
-                    (self.lead_banks[bot.team] >= Soldier.lead_value)
-                    | (self.gold_banks[bot.team] >= Sage.gold_value)
+                    (self.lead_banks[unit.team] >= Soldier.lead_value)
+                    | (self.gold_banks[unit.team] >= Sage.gold_value)
                 )
-        elif isinstance(bot, Laboratory):
+        elif isinstance(unit, Laboratory):
             assert ret.shape == (2,)
 
-            if bot.act_cd < 10:
-                lead_cost = bot.lead_ratio(
-                    len(list(self.nearby_bots(bot.y, bot.x, bot.vis_rad, bot.team))) - 1
+            if unit.act_cd < 10:
+                lead_cost = unit.lead_ratio(
+                    len(list(self.nearby_units(unit.y, unit.x, unit.vis_rad, unit.team))) - 1
                 )
-                ret[1] = self.lead_banks[bot.team] >= lead_cost
-        elif isinstance(bot, Watchtower):
+                ret[1] = self.lead_banks[unit.team] >= lead_cost
+        elif isinstance(unit, Watchtower):
             return NotImplementedError  # TODO
 
         return ret
 
-    def move(self, bot: Entity, action: int):
-        assert bot.move_cd < 10
+    def move(self, unit: Unit, action: int):
+        assert unit.move_cd < 10
         dy, dx = DIRECTIONS[action]
-        assert (bot.y + dy, bot.x + dx) not in self.pos_map
-        assert self.in_bounds(bot.y + dy, bot.x + dx)
+        assert (unit.y + dy, unit.x + dx) not in self.pos_map
+        assert self.in_bounds(unit.y + dy, unit.x + dx)
 
         self.cached_obs = None
-        del self.pos_map[(bot.y, bot.x)]
-        bot.y += dy
-        bot.x += dx
-        self.pos_map[(bot.y, bot.x)] = bot
-        bot.add_move_cost(self.rubble[bot.y, bot.x])
+        del self.pos_map[(unit.y, unit.x)]
+        unit.y += dy
+        unit.x += dx
+        self.pos_map[(unit.y, unit.x)] = unit
+        unit.add_move_cost(self.rubble[unit.y, unit.x])
 
-    def attack(self, bot: Entity, target: Entity):
-        if isinstance(bot, (Archon, Builder)):
-            assert bot.team == target.team
-        elif isinstance(bot, (Soldier, Sage, Watchtower)):
-            assert bot.team == 1 - target.team
+    def attack(self, unit: Unit, target: Unit):
+        if isinstance(unit, (Archon, Builder)):
+            assert unit.team == target.team
+        elif isinstance(unit, (Soldier, Sage, Watchtower)):
+            assert unit.team == 1 - target.team
         else:
             raise TypeError
 
-        assert bot.act_cd < 10
+        assert unit.act_cd < 10
 
         self.cached_obs = None
-        bot.add_act_cost(self.rubble[bot.y, bot.x])
+        unit.add_act_cost(self.rubble[unit.y, unit.x])
 
         old_hp = target.curr_hp
-        target.curr_hp = min(target.curr_hp - bot.dmg, target.max_hp)
+        target.curr_hp = min(target.curr_hp - unit.dmg, target.max_hp)
         dmg_dealt = old_hp - max(target.curr_hp, 0)
         killed = target.curr_hp <= 0
         self.episode_metrics["dmg_dealt"] += dmg_dealt
@@ -318,16 +322,16 @@ class BattlecodeEnv:
 
         return dmg_dealt, killed
 
-    def disintegrate(self, bot):
-        assert isinstance(bot, Builder)
-        assert self.lead[bot.y, bot.x] == 0  # heuristic constraint
+    def disintegrate(self, unit):
+        assert isinstance(unit, Builder)
+        assert self.lead[unit.y, unit.x] == 0  # heuristic constraint
 
         self.cached_obs = None
-        self.lead[bot.y, bot.x] += int(0.2 * bot.lead_value)
-        idx = self.units.index(bot)
+        self.lead[unit.y, unit.x] += int(0.2 * unit.lead_value)
+        idx = self.units.index(unit)
 
         del self.units[idx]
-        del self.pos_map[(bot.y, bot.x)]
+        del self.pos_map[(unit.y, unit.x)]
         if idx <= self.curr_idx:
             self.curr_idx -= 1
 
@@ -349,97 +353,97 @@ class BattlecodeEnv:
 
         self.episode_metrics[f"spawned_{unit_class.__name__.lower()}"] += 1
 
-    def step(self, bot, action):
-        if not isinstance(bot, Building) and 1 <= action <= 8:
-            self.move(bot, action)
+    def step(self, unit, action):
+        if not isinstance(unit, Building) and 1 <= action <= 8:
+            self.move(unit, action)
 
         # auto-mining
-        if isinstance(bot, Miner) and bot.act_cd < 10:
+        if isinstance(unit, Miner) and unit.act_cd < 10:
             available_lead = [
                 pos
-                for (dy, dx) in within_radius(bot.act_rad, prev_move=action)
-                if self.in_bounds(bot.y + dy, bot.x + dx)
-                and self.lead[pos := (bot.y + dy, bot.x + dx)] >= 1
+                for (dy, dx) in within_radius(unit.act_rad, prev_move=action)
+                if self.in_bounds(unit.y + dy, unit.x + dx)
+                and self.lead[pos := (unit.y + dy, unit.x + dx)] >= 1
             ]
-            while available_lead and bot.act_cd < 10:
+            while available_lead and unit.act_cd < 10:
                 self.cached_obs = None
                 selected = self.rng.choice(available_lead)
                 self.lead[selected] -= 1
-                self.lead_banks[bot.team] += 1
+                self.lead_banks[unit.team] += 1
                 if self.lead[selected] <= 1:
                     available_lead.remove(selected)
-                bot.add_act_cost(self.rubble[bot.y, bot.x])
+                unit.add_act_cost(self.rubble[unit.y, unit.x])
                 self.episode_metrics[f"lead_mined"] += 1
 
         # auto-repair
         if (
-            (isinstance(bot, Builder) and 0 <= action <= 8)
-            or (isinstance(bot, Archon) and action == 0)
-        ) and bot.act_cd < 10:
+            (isinstance(unit, Builder) and 0 <= action <= 8)
+            or (isinstance(unit, Archon) and action == 0)
+        ) and unit.act_cd < 10:
             targets = list(
-                self.nearby_bots(bot.y, bot.x, bot.act_rad, bot.team, prev_move=action)
+                self.nearby_units(unit.y, unit.x, unit.act_rad, unit.team, prev_move=action)
             )
             targets = [
                 target
                 for target in targets
-                if target.curr_hp < target.max_hp and target != bot
+                if target.curr_hp < target.max_hp and target != unit
             ]
             if targets:
                 self.cached_obs = None
                 selected = self.rng.choice(targets)
-                self.attack(bot, selected)
+                self.attack(unit, selected)
 
         # lab construction
-        if isinstance(bot, Builder) and action == 9:
-            assert self.lead_banks[bot.team] >= Laboratory.lead_value
+        if isinstance(unit, Builder) and action == 9:
+            assert self.lead_banks[unit.team] >= Laboratory.lead_value
             available_pos = [
-                (bot.y + dy, bot.x + dx)
+                (unit.y + dy, unit.x + dx)
                 for (dy, dx) in DIRECTIONS[1:]
-                if (bot.y + dy, bot.x + dx) not in self.pos_map
-                and self.in_bounds(bot.y + dy, bot.x + dx)
+                if (unit.y + dy, unit.x + dx) not in self.pos_map
+                and self.in_bounds(unit.y + dy, unit.x + dx)
             ]
             assert len(available_pos) > 0
             chosen_pos = self.rng.choice(available_pos)
-            self.spawn(Laboratory, chosen_pos, bot.team)
-            bot.add_act_cost(self.rubble[bot.y, bot.x])
+            self.spawn(Laboratory, chosen_pos, unit.team)
+            unit.add_act_cost(self.rubble[unit.y, unit.x])
 
         # disintegrate
-        if isinstance(bot, Builder) and action == 10:
-            self.disintegrate(bot)
+        if isinstance(unit, Builder) and action == 10:
+            self.disintegrate(unit)
 
         # auto-attacking
-        if isinstance(bot, (Soldier, Sage)) and bot.act_cd < 10:
+        if isinstance(unit, (Soldier, Sage)) and unit.act_cd < 10:
             nearby_enemies = list(
-                self.nearby_bots(
-                    bot.y, bot.x, bot.act_rad, 1 - bot.team, prev_move=action
+                self.nearby_units(
+                    unit.y, unit.x, unit.act_rad, 1 - unit.team, prev_move=action
                 )
             )
             if nearby_enemies:
 
-                def score(enemy: Entity):
-                    num_shots = enemy.curr_hp // bot.dmg
-                    return -num_shots, enemy.curr_hp, -bot.distsq(enemy)
+                def score(enemy: Unit):
+                    num_shots = enemy.curr_hp // unit.dmg
+                    return -num_shots, enemy.curr_hp, -unit.distsq(enemy)
 
                 best_score = max(score(enemy) for enemy in nearby_enemies)
                 chosen_enemy = self.rng.choice(
                     [enemy for enemy in nearby_enemies if score(enemy) == best_score]
                 )
-                self.attack(bot, chosen_enemy)
+                self.attack(unit, chosen_enemy)
 
         # droid creation
-        if isinstance(bot, Archon) and action != 0:
-            assert bot.act_cd < 10
+        if isinstance(unit, Archon) and action != 0:
+            assert unit.act_cd < 10
             map_center = (self.height // 2, self.width // 2)
             all_spawn_pos = []
             good_spawn_pos = []
             for dy, dx in DIRECTIONS[1:]:
-                y = bot.y + dy
-                x = bot.x + dx
+                y = unit.y + dy
+                x = unit.x + dx
                 if (y, x) not in self.pos_map and self.in_bounds(y, x):
                     all_spawn_pos.append((y, x))
                     if abs(y - map_center[0]) + abs(x - map_center[1]) < abs(
-                        bot.y - map_center[0]
-                    ) + abs(bot.x - map_center[1]):
+                        unit.y - map_center[0]
+                    ) + abs(unit.x - map_center[1]):
                         good_spawn_pos.append((y, x))
 
             assert all_spawn_pos
@@ -450,58 +454,58 @@ class BattlecodeEnv:
             unit_class_map = {
                 1: Miner,
                 2: Builder,
-                3: Sage if self.gold_banks[bot.team] >= Sage.gold_value else Soldier,
+                3: Sage if self.gold_banks[unit.team] >= Sage.gold_value else Soldier,
             }
             new_unit_class = unit_class_map[action]
-            self.spawn(new_unit_class, chosen_pos, bot.team)
-            bot.add_act_cost(self.rubble[bot.y, bot.x])
+            self.spawn(new_unit_class, chosen_pos, unit.team)
+            unit.add_act_cost(self.rubble[unit.y, unit.x])
 
         # auto-transmute
-        if isinstance(bot, Laboratory) and action == 1:
-            lead_cost = bot.lead_ratio(
-                len(list(self.nearby_bots(bot.y, bot.x, bot.vis_rad, bot.team))) - 1
+        if isinstance(unit, Laboratory) and action == 1:
+            lead_cost = unit.lead_ratio(
+                len(list(self.nearby_units(unit.y, unit.x, unit.vis_rad, unit.team))) - 1
             )
             assert (
-                self.lead_banks[bot.team] >= lead_cost
-            ), f"{self.lead_banks[bot.team]}, {lead_cost}"
-            self.lead_banks[bot.team] -= lead_cost
-            self.gold_banks[bot.team] += 1
-            bot.add_act_cost(self.rubble[(bot.y, bot.x)])
+                self.lead_banks[unit.team] >= lead_cost
+            ), f"{self.lead_banks[unit.team]}, {lead_cost}"
+            self.lead_banks[unit.team] -= lead_cost
+            self.gold_banks[unit.team] += 1
+            unit.add_act_cost(self.rubble[(unit.y, unit.x)])
 
         if min(self.archon_counts) == 0:
             self.done = True
 
     def iter_agents(
         self,
-    ) -> typing.Generator[tuple[Entity, np.ndarray], None, None]:
-        """Yields Entity objects and action masks"""
+    ) -> typing.Generator[tuple[Unit, np.ndarray], None, None]:
+        """Yields Unit objects and action masks"""
         assert self.curr_idx is None
         assert self.t < self.max_episode_length
 
         self.curr_idx = 0
         while self.curr_idx < len(self.units):
-            bot = self.units[self.curr_idx]
+            unit = self.units[self.curr_idx]
 
             # temporary heuristic behavior, not policy-controlled
-            if isinstance(bot, Laboratory):
-                if self.legal_action_mask(bot)[1]:
-                    self.step(bot, action=1)
+            if isinstance(unit, Laboratory):
+                if self.legal_action_mask(unit)[1]:
+                    self.step(unit, action=1)
                 else:
-                    self.step(bot, action=0)
+                    self.step(unit, action=0)
                 self.curr_idx += 1
                 continue
 
-            assert not isinstance(bot, Watchtower)  # TODO
+            assert not isinstance(unit, Watchtower)  # TODO
 
-            yield bot, self.legal_action_mask(bot)
+            yield unit, self.legal_action_mask(unit)
 
             self.curr_idx += 1
         self.curr_idx = None
         self.cached_obs = None
 
-        for bot in self.units:
-            bot.move_cd = max(0, bot.move_cd - 10)
-            bot.act_cd = max(0, bot.act_cd - 10)
+        for unit in self.units:
+            unit.move_cd = max(0, unit.move_cd - 10)
+            unit.act_cd = max(0, unit.act_cd - 10)
 
         self.t += 1
         if self.t == self.max_episode_length:

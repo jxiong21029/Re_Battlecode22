@@ -19,7 +19,7 @@ DIRECTIONS = [
 ]
 
 
-class Entity(ABC):
+class Unit(ABC):
     def __init__(self, x: int, y: int, team: int):
         self.x: int = x
         self.y: int = y
@@ -82,7 +82,7 @@ class Entity(ABC):
     def action_space(self) -> gym.spaces.Discrete:
         raise NotImplementedError
 
-    def distsq(self, other: "Entity"):
+    def distsq(self, other: "Unit"):
         return (self.x - other.x) ** 2 + (self.y - other.y) ** 2
 
     def add_move_cost(self, rubble: int):
@@ -95,7 +95,7 @@ class Entity(ABC):
         return f"{self.__class__.__name__}(team={self.team})@({self.y:02},{self.x:02})"
 
 
-class Miner(Entity):
+class Miner(Unit):
     lead_value = 50
     gold_value = 0
     max_hp = 40
@@ -112,7 +112,7 @@ class Miner(Entity):
     action_space = gym.spaces.Discrete(9)  # TODO: add leave-1-remaining decision
 
 
-class Builder(Entity):
+class Builder(Unit):
     lead_value = 40
     gold_value = 0
     max_hp = 30
@@ -129,7 +129,7 @@ class Builder(Entity):
     action_space = gym.spaces.Discrete(11)
 
 
-class Soldier(Entity):
+class Soldier(Unit):
     lead_value = 75
     gold_value = 0
     max_hp = 50
@@ -146,7 +146,7 @@ class Soldier(Entity):
     action_space = gym.spaces.Discrete(9)
 
 
-class Sage(Entity):
+class Sage(Unit):
     lead_value = 0
     gold_value = 20
     max_hp = 100
@@ -163,7 +163,7 @@ class Sage(Entity):
     action_space = gym.spaces.Discrete(9)
 
 
-class Building(Entity):
+class Building(Unit):
     def __init__(
         self,
         x: int,
