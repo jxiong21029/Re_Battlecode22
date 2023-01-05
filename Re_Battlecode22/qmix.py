@@ -1,4 +1,5 @@
 import copy
+import itertools
 import math
 import random
 from dataclasses import dataclass
@@ -58,14 +59,20 @@ class QMixAgents(nn.Module):
         self.target_augmentations = target_augmentations
         self.logger = logger
 
-        self.local_qnets = nn.ModuleDict(
+        self.self_nets = nn.ModuleDict(
+            {
+                cls.__name__: nn.Linear(11 if cls == Archon else 5, cls.action_space.n)
+                for cls in (Miner, Builder, Soldier, Sage, Archon)
+            }
+        )
+        self.tile_nets = nn.ModuleDict(
             {
                 cls.__name__: MaskedConv(cls)
                 for cls in (Miner, Builder, Soldier, Sage, Archon)
             }
         )
 
-        self.conv1 = nn.Sequential(
+        self.state_conv = nn.Sequential(
             nn.Conv2d(30, 16, kernel_size=3, padding="same"),
             nn.ReLU(),
         )
@@ -83,30 +90,63 @@ class QMixAgents(nn.Module):
         )
         self.bias_head = nn.Sequential(nn.ReLU(), nn.Linear(16, 1))
 
-    def explore_step(self, env: BattlecodeEnv, epsilon=0.01):
+    def explore_step(self, envs: list[BattlecodeEnv], epsilon: float):
         """Runs epsilon-greedy exploration: steps env, returning actions and reward"""
+        cls_map = {
+            Archon: 0,
+            Miner: 1,
+            Builder: 2,
+            Soldier: 3,
+            Sage: 4,
+        }
 
-        actions = []
+        all_tiles = []
+        max_height = max(env.height for env in envs)
+        max_width = max(env.width for env in envs)
+        for env in envs:
+            tiles0 = env.tile_observations(team=0)
+            height_pad = max_height - tiles0.shape[0]
+            width_pad = max_width - tiles0.shape[1]
+
+            all_tiles.append(
+                F.pad(torch.tensor(tiles0), pad=(0, width_pad, 0, height_pad))
+            )
+            all_tiles.append(
+                F.pad(
+                    torch.tensor(env.tile_observations(team=1)),
+                    pad=(0, width_pad, 0, height_pad),
+                )
+            )
+
         if epsilon == 1:
-            preds = {}
+            tile_preds = {
+                cls: self.tile_nets[cls.__name__](torch.stack(all_tiles))
+                for cls in cls_map.keys()
+            }
         else:
-            preds = {cls: self.local_qnets[cls.__name__](torch.tensor(env.observations())) for cls in (Miner, Builder, Soldier, Sage, Archon)}
-        for unit, action_mask in env.iter_agents():
-            if self.rng.random() < epsilon:
-                action = self.rng.choice(np.arange(unit.action_space.n)[action_mask])
-            else:
-                unit_preds = preds[unit.__class__][:, unit.y, unit.x]
-                if unit.team == 0:
-                    unit_preds[~action_mask] = -1e8
-                    action = torch.argmax(unit_preds).item()
-                else:
-                    unit_preds[~action_mask] = 1e8
-                    action = torch.argmin(unit_preds).item()
-            actions.append(action)
-            env.step(unit, action)
+            tile_preds = {}
 
-        reward = env.get_team_reward()
-        return actions, reward
+        for i, env in enumerate(envs):
+            actions = []
+            for unit, action_mask in env.iter_agents():
+                if self.rng.random() < epsilon:
+                    action = self.rng.choice(np.arange(unit.action_space.n)[action_mask])
+                else:
+                    self_preds = self.self_nets[unit.__class__.__name__](torch.tensor(env.self_observation(unit)))
+                    preds = tile_preds[unit][i, unit.y, unit.x] + self_preds
+
+                    if unit.team == 0:
+                        preds[~action_mask] = -1e8
+                        action = torch.argmax(preds).item()
+                    else:
+                        preds[~action_mask] = 1e8
+                        action = torch.argmin(preds).item()
+
+                actions.append(action)
+                env.step(unit, action)
+
+            reward = env.get_team_reward()
+            yield actions, reward
 
     def forward(
         self,
@@ -114,7 +154,7 @@ class QMixAgents(nn.Module):
         actions: list[int],
     ) -> tuple[torch.Tensor, BattlecodeEnv]:
         """Computes Q-values given actions"""
-        x = self.conv1(torch.tensor(env.state()))
+        x = self.state_conv(torch.tensor(env.state()))
         z = self.squeeze_and_excite(x)
         global_q = self.bias_head(z).squeeze()
         weights = F.softplus(
@@ -206,7 +246,7 @@ class Trainer:
         )
         for _ in iterator:
             curr_state = copy.deepcopy(self.env)
-            action, reward = self.model.explore_step(self.env, epsilon=1)
+            action, reward = self.model.explore_step([self.env], epsilon=1)
             self.store(curr_state, action, reward)
             if self.env.done:
                 self.env.reset(seed=self.rng.randrange(2**32))

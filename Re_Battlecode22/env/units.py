@@ -75,10 +75,6 @@ class Unit(ABC):
         pass
 
     @property
-    def observation_space(self) -> gym.spaces.Box:
-        raise NotImplementedError
-
-    @property
     def action_space(self) -> gym.spaces.Discrete:
         raise NotImplementedError
 
@@ -106,9 +102,6 @@ class Miner(Unit):
     vis_rad = 20
     sprite = "m"
 
-    observation_space = gym.spaces.Box(
-        -np.inf, np.inf, shape=(5 + len(within_radius(20)) * 7,)
-    )
     action_space = gym.spaces.Discrete(9)  # TODO: add leave-1-remaining decision
 
 
@@ -123,9 +116,6 @@ class Builder(Unit):
     vis_rad = 20
     sprite = "b"
 
-    observation_space = gym.spaces.Box(
-        -np.inf, np.inf, shape=(5 + len(within_radius(20)) * 5,)
-    )
     action_space = gym.spaces.Discrete(11)
 
 
@@ -140,9 +130,6 @@ class Soldier(Unit):
     vis_rad = 20
     sprite = "s"
 
-    observation_space = gym.spaces.Box(
-        -np.inf, np.inf, shape=(5 + len(within_radius(20)) * 5,)
-    )
     action_space = gym.spaces.Discrete(9)
 
 
@@ -157,9 +144,6 @@ class Sage(Unit):
     vis_rad = 34
     sprite = "g"
 
-    observation_space = gym.spaces.Box(
-        -np.inf, np.inf, shape=(5 + len(within_radius(34)) * 5,)
-    )
     action_space = gym.spaces.Discrete(9)
 
 
@@ -192,7 +176,6 @@ class Archon(Building):
     vis_rad = 34
     sprite = "A"
 
-    observation_space = gym.spaces.Box(-np.inf, np.inf, shape=(11,))
     action_space = gym.spaces.Discrete(4)
 
     def __init__(self, x, y, team):
@@ -225,7 +208,6 @@ class Laboratory(Building):
     vis_rad = 53
     sprite = "L"
 
-    observation_space = None
     action_space = gym.spaces.Discrete(2)
 
     def __init__(self, x, y, team):

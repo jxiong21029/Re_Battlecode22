@@ -94,20 +94,20 @@ class Renderer:
 
                 if (y, x) not in env.pos_map:
                     continue
-                bot = env.pos_map[(y, x)]
-                team = "blue_" if bot.team == 0 else "red_"
+                unit = env.pos_map[(y, x)]
+                team = "blue_" if unit.team == 0 else "red_"
                 image = pygame.image.load(
                     os.path.join(
-                        img_dir, team + bot.__class__.__name__.lower() + ".png"
+                        img_dir, team + unit.__class__.__name__.lower() + ".png"
                     )
                 )
-                sz = max(2, round(bot.curr_hp / bot.max_hp * size / 2) * 2)
+                sz = max(2, round(unit.curr_hp / unit.max_hp * size / 2) * 2)
                 image = pygame.transform.smoothscale(image, (sz, sz))
                 self.screen.blit(
                     image,
                     (
-                        MARGIN + size * bot.x + size // 2 - sz // 2,
-                        MARGIN + size * bot.y + size // 2 - sz // 2,
+                        MARGIN + size * unit.x + size // 2 - sz // 2,
+                        MARGIN + size * unit.y + size // 2 - sz // 2,
                     ),
                 )
         pygame.display.flip()

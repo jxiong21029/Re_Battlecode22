@@ -5,17 +5,18 @@ import typing
 from collections import defaultdict
 
 import numpy as np
+import torch
 
 from ..utils import DIRECTIONS, within_radius
 from .units import (
     Archon,
     Builder,
     Building,
-    Unit,
     Laboratory,
     Miner,
     Sage,
     Soldier,
+    Unit,
     Watchtower,
 )
 
@@ -39,21 +40,23 @@ class BattlecodeEnv:
         self.reward_scaling_factor = reward_scaling_factor
         self.rng = None
 
+        self.t = None
         self.height = None
         self.width = None
         self.rubble = None
         self.lead = None
         self.gold = None
-        self.t = None
         self.lead_banks = None
         self.gold_banks = None
+        self.cached_tiles = None
+
         self.units: list[Unit] = None
         self.pos_map = None
-        self.archon_counts = None
-        self.done = None
+        self.unit_counts = None
         self.curr_idx = None
+
+        self.done = None
         self.prev_value_differential = None
-        self.cached_tiles = None
         self.episode_metrics = None
 
     def in_bounds(self, y, x):
@@ -88,14 +91,18 @@ class BattlecodeEnv:
         self.t = 0
         self.lead_banks = [200, 200]
         self.gold_banks = [0, 0]
+
         self.units = []
         self.pos_map = {}
         for row0, row1 in zip(data["team0_archon_pos"], data["team1_archon_pos"]):
             self.units.append(Archon(y=row0[0], x=row0[1], team=0))
             self.units.append(Archon(y=row1[0], x=row1[1], team=1))
+        self.unit_counts = defaultdict(lambda: [0, 0])
         for unit in self.units:
             self.pos_map[(unit.y, unit.x)] = unit
-        self.archon_counts = [len(self.units) // 2, len(self.units) // 2]
+            self.unit_counts[unit.__class__][unit.team] += 1
+
+        self.done = False
         self.prev_value_differential = 0
         self.episode_metrics = {
             "lead_mined": 0,
@@ -107,35 +114,53 @@ class BattlecodeEnv:
             "spawned_sage": 0,
             "spawned_laboratory": 0,
         }
-        self.done = False
 
-    def observe(self, unit: Unit):
-        pass
+    # TODO: symmetries
+    # def observe(self, unit, symmetry=0):  # 4 rotations * 2 reflections * 2 team swaps
+    #     # team swap has no effect on observe() due to locality
+    def self_observation(self, unit):
+        if isinstance(unit, Archon):
+            return torch.tensor(
+                [
+                    (unit.y - self.height / 2 + 0.5) / 30,
+                    (unit.x - self.width / 2 + 0.5) / 30,
+                    self.height / 60,
+                    self.width / 60,
+                    self.t / 2000,
+                    self.lead_banks[unit.team] / 256,
+                    self.gold_banks[unit.team] / 64,
+                    self.unit_counts[Miner][unit.team] / 16,
+                    self.unit_counts[Builder][unit.team] / 16,
+                    self.unit_counts[Soldier][unit.team] / 16,
+                    self.unit_counts[Sage][unit.team] / 16,
+                ],
+                dtype=torch.float32,
+            )
+        return torch.tensor(
+            [
+                (unit.y - self.height / 2 + 0.5) / 30,
+                (unit.x - self.width / 2 + 0.5) / 30,
+                unit.curr_hp,
+                unit.move_cd,
+                unit.act_cd,
+            ],
+            dtype=torch.float32,
+        )
 
+    def tile_observations(self, team):
+        if team == 0:
+            return self.cached_tiles
+        return self.cached_tiles[[0, 2, 1, 4, 3, 5, 6]]  # swap teams
 
-    # TODO: fix archon observations
-    def observations(self):
-        if self.cached_obs is not None:
-            return self.cached_obs
-
-        counts = defaultdict(lambda: [0, 0])
+    def recomputed_tiles(self):
+        ret = np.zeros((7, self.height, self.width), dtype=np.float32)
+        ret[0] = self.rubble / 100
         for unit in self.units:
-            counts[unit.__class__.__name__.lower()][unit.team] += 1
-
-        i = 0
-        j = 0
-        archon_obs = np.zeros((2, 11), dtype=np.float32)
-        archon_obs
-
-        tile_obs = np.zeros((7, self.height, self.width), dtype=np.float32)
-        tile_obs[0] = self.rubble / 100
-        for unit in self.units:
-            tile_obs[1 + unit.team, unit.y, unit.x] = np.log1p(unit.curr_hp) / 2
-            tile_obs[3 + unit.team, unit.y, unit.x] = 1 if isinstance(unit, Building) else 0
-        tile_obs[5] = self.lead / 64
-        tile_obs[6] = self.gold / 16
-        self.cached_obs = tile_obs
-        return tile_obs
+            ret[1 + unit.team, unit.y, unit.x] = np.log1p(unit.curr_hp) / 2
+            ret[3 + unit.team, unit.y, unit.x] = 1 if isinstance(unit, Building) else 0
+        ret[5] = self.lead / 64
+        ret[6] = self.gold / 16
+        return ret
 
     def state(self):
         # timestep, lead bank, gold bank for both teams, map size, x, y coordinate (9)
@@ -266,7 +291,10 @@ class BattlecodeEnv:
 
             if unit.act_cd < 10:
                 lead_cost = unit.lead_ratio(
-                    len(list(self.nearby_units(unit.y, unit.x, unit.vis_rad, unit.team))) - 1
+                    len(
+                        list(self.nearby_units(unit.y, unit.x, unit.vis_rad, unit.team))
+                    )
+                    - 1
                 )
                 ret[1] = self.lead_banks[unit.team] >= lead_cost
         elif isinstance(unit, Watchtower):
@@ -280,11 +308,16 @@ class BattlecodeEnv:
         assert (unit.y + dy, unit.x + dx) not in self.pos_map
         assert self.in_bounds(unit.y + dy, unit.x + dx)
 
-        self.cached_obs = None
         del self.pos_map[(unit.y, unit.x)]
+        self.cached_tiles[1 + unit.team, unit.y, unit.x] = 0
+        self.cached_tiles[3 + unit.team, unit.y, unit.x] = 0
         unit.y += dy
         unit.x += dx
         self.pos_map[(unit.y, unit.x)] = unit
+        self.cached_tiles[1 + unit.team, unit.y, unit.x] = np.log1p(unit.curr_hp) / 2
+        self.cached_tiles[3 + unit.team, unit.y, unit.x] = (
+            1 if isinstance(unit, Building) else 0
+        )
         unit.add_move_cost(self.rubble[unit.y, unit.x])
 
     def attack(self, unit: Unit, target: Unit):
@@ -297,20 +330,23 @@ class BattlecodeEnv:
 
         assert unit.act_cd < 10
 
-        self.cached_obs = None
-        unit.add_act_cost(self.rubble[unit.y, unit.x])
-
         old_hp = target.curr_hp
         target.curr_hp = min(target.curr_hp - unit.dmg, target.max_hp)
         dmg_dealt = old_hp - max(target.curr_hp, 0)
         killed = target.curr_hp <= 0
+        unit.add_act_cost(self.rubble[unit.y, unit.x])
         self.episode_metrics["dmg_dealt"] += dmg_dealt
         if killed:
-            if isinstance(target, Archon):
-                self.archon_counts[target.team] -= 1
-
+            self.unit_counts[target.__class__][target.team] -= 1
+            self.cached_tiles[1:5, target.y, target.x] = 0
             self.lead[target.y, target.x] += int(0.2 * target.lead_value)
             self.gold[target.y, target.x] += int(0.2 * target.gold_value)
+            self.cached_tiles[5, target.y, target.x] = (
+                self.lead[target.y, target.x] / 64
+            )
+            self.cached_tiles[6, target.y, target.x] = (
+                self.gold[target.y, target.x] / 16
+            )
 
             idx = self.units.index(target)
             del self.units[idx]
@@ -319,6 +355,10 @@ class BattlecodeEnv:
                 self.curr_idx -= 1
 
             self.episode_metrics["units_killed"] += 1
+        else:
+            self.cached_tiles[1 + target.team, target.y, target.x] = (
+                np.log1p(target.curr_hp) / 2
+            )
 
         return dmg_dealt, killed
 
@@ -326,12 +366,13 @@ class BattlecodeEnv:
         assert isinstance(unit, Builder)
         assert self.lead[unit.y, unit.x] == 0  # heuristic constraint
 
-        self.cached_obs = None
         self.lead[unit.y, unit.x] += int(0.2 * unit.lead_value)
+        self.cached_tiles[5, unit.y, unit.x] = self.lead[unit.y, unit.x] / 64
         idx = self.units.index(unit)
 
         del self.units[idx]
         del self.pos_map[(unit.y, unit.x)]
+        self.cached_tiles[1:5, unit.y, unit.x] = 0
         if idx <= self.curr_idx:
             self.curr_idx -= 1
 
@@ -344,12 +385,15 @@ class BattlecodeEnv:
         ), f"{self.lead_banks[team]} {unit_class.__name__}"
         assert self.gold_banks[team] >= unit_class.gold_value
 
-        self.cached_obs = None
-        new_unit = unit_class(y=pos[0], x=pos[1], team=team)
-        self.units.append(new_unit)
-        self.pos_map[pos] = new_unit
-        self.lead_banks[team] -= new_unit.lead_value
-        self.gold_banks[team] -= new_unit.gold_value
+        unit = unit_class(y=pos[0], x=pos[1], team=team)
+        self.units.append(unit)
+        self.pos_map[pos] = unit
+        self.cached_tiles[1 + unit.team, unit.y, unit.x] = np.log1p(unit.curr_hp) / 2
+        self.cached_tiles[3 + unit.team, unit.y, unit.x] = (
+            1 if isinstance(unit, Building) else 0
+        )
+        self.lead_banks[team] -= unit.lead_value
+        self.gold_banks[team] -= unit.gold_value
 
         self.episode_metrics[f"spawned_{unit_class.__name__.lower()}"] += 1
 
@@ -366,10 +410,12 @@ class BattlecodeEnv:
                 and self.lead[pos := (unit.y + dy, unit.x + dx)] >= 1
             ]
             while available_lead and unit.act_cd < 10:
-                self.cached_obs = None
                 selected = self.rng.choice(available_lead)
                 self.lead[selected] -= 1
                 self.lead_banks[unit.team] += 1
+                self.cached_tiles[5, selected[0], selected[1]] = (
+                    self.lead[selected] / 64
+                )
                 if self.lead[selected] <= 1:
                     available_lead.remove(selected)
                 unit.add_act_cost(self.rubble[unit.y, unit.x])
@@ -381,7 +427,9 @@ class BattlecodeEnv:
             or (isinstance(unit, Archon) and action == 0)
         ) and unit.act_cd < 10:
             targets = list(
-                self.nearby_units(unit.y, unit.x, unit.act_rad, unit.team, prev_move=action)
+                self.nearby_units(
+                    unit.y, unit.x, unit.act_rad, unit.team, prev_move=action
+                )
             )
             targets = [
                 target
@@ -389,7 +437,6 @@ class BattlecodeEnv:
                 if target.curr_hp < target.max_hp and target != unit
             ]
             if targets:
-                self.cached_obs = None
                 selected = self.rng.choice(targets)
                 self.attack(unit, selected)
 
@@ -463,7 +510,8 @@ class BattlecodeEnv:
         # auto-transmute
         if isinstance(unit, Laboratory) and action == 1:
             lead_cost = unit.lead_ratio(
-                len(list(self.nearby_units(unit.y, unit.x, unit.vis_rad, unit.team))) - 1
+                len(list(self.nearby_units(unit.y, unit.x, unit.vis_rad, unit.team)))
+                - 1
             )
             assert (
                 self.lead_banks[unit.team] >= lead_cost
@@ -472,7 +520,7 @@ class BattlecodeEnv:
             self.gold_banks[unit.team] += 1
             unit.add_act_cost(self.rubble[(unit.y, unit.x)])
 
-        if min(self.archon_counts) == 0:
+        if min(self.unit_counts[Archon]) == 0:
             self.done = True
 
     def iter_agents(
@@ -481,6 +529,8 @@ class BattlecodeEnv:
         """Yields Unit objects and action masks"""
         assert self.curr_idx is None
         assert self.t < self.max_episode_length
+
+        self.cached_tiles = self.recomputed_tiles()
 
         self.curr_idx = 0
         while self.curr_idx < len(self.units):
@@ -501,7 +551,6 @@ class BattlecodeEnv:
 
             self.curr_idx += 1
         self.curr_idx = None
-        self.cached_obs = None
 
         for unit in self.units:
             unit.move_cd = max(0, unit.move_cd - 10)
@@ -517,8 +566,8 @@ class BattlecodeEnv:
                 self.lead[self.lead > 0] += 5
 
     def winner(self):
-        if self.archon_counts[0] != self.archon_counts[1]:
-            return 0 if self.archon_counts[0] > self.archon_counts[1] else 1
+        if self.unit_counts[Archon][0] != self.unit_counts[Archon][1]:
+            return 0 if self.unit_counts[Archon][0] > self.unit_counts[Archon][1] else 1
         lead_values = self.lead_banks.copy()
         gold_values = self.gold_banks.copy()
         for unit in self.units:
