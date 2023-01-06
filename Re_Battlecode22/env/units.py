@@ -1,9 +1,6 @@
 import math
 from abc import ABC, abstractmethod
 
-import gym
-import numpy as np
-
 from ..utils import within_radius
 
 DIRECTIONS = [
@@ -75,7 +72,7 @@ class Unit(ABC):
         pass
 
     @property
-    def action_space(self) -> gym.spaces.Discrete:
+    def num_actions(self) -> int:
         raise NotImplementedError
 
     def distsq(self, other: "Unit"):
@@ -101,8 +98,7 @@ class Miner(Unit):
     act_rad = 2
     vis_rad = 20
     sprite = "m"
-
-    action_space = gym.spaces.Discrete(9)  # TODO: add leave-1-remaining decision
+    num_actions = 9  # TODO: add leave-1-remaining decision
 
 
 class Builder(Unit):
@@ -115,8 +111,7 @@ class Builder(Unit):
     act_rad = 5
     vis_rad = 20
     sprite = "b"
-
-    action_space = gym.spaces.Discrete(11)
+    num_actions = 11
 
 
 class Soldier(Unit):
@@ -129,8 +124,7 @@ class Soldier(Unit):
     act_rad = 13
     vis_rad = 20
     sprite = "s"
-
-    action_space = gym.spaces.Discrete(9)
+    num_actions = 9
 
 
 class Sage(Unit):
@@ -143,8 +137,7 @@ class Sage(Unit):
     act_rad = 25
     vis_rad = 34
     sprite = "g"
-
-    action_space = gym.spaces.Discrete(9)
+    num_actions = 9
 
 
 class Building(Unit):
@@ -175,8 +168,7 @@ class Archon(Building):
     act_rad = 20
     vis_rad = 34
     sprite = "A"
-
-    action_space = gym.spaces.Discrete(4)
+    num_actions = 4
 
     def __init__(self, x, y, team):
         super().__init__(x, y, team, mode="turret")
@@ -207,8 +199,7 @@ class Laboratory(Building):
     act_rad = 0
     vis_rad = 53
     sprite = "L"
-
-    action_space = gym.spaces.Discrete(2)
+    num_actions = 2
 
     def __init__(self, x, y, team):
         super().__init__(x, y, team, mode="prototype")

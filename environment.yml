@@ -21,3 +21,4 @@ dependencies:
   - pip:
       - pygame
       - ray[tune]
+      - trueskill

@@ -5,7 +5,6 @@ import typing
 from collections import defaultdict
 
 import numpy as np
-import torch
 
 from ..utils import DIRECTIONS, within_radius
 from .units import (
@@ -120,7 +119,7 @@ class BattlecodeEnv:
     #     # team swap has no effect on observe() due to locality
     def self_observation(self, unit):
         if isinstance(unit, Archon):
-            return torch.tensor(
+            return np.array(
                 [
                     (unit.y - self.height / 2 + 0.5) / 30,
                     (unit.x - self.width / 2 + 0.5) / 30,
@@ -134,9 +133,9 @@ class BattlecodeEnv:
                     self.unit_counts[Soldier][unit.team] / 16,
                     self.unit_counts[Sage][unit.team] / 16,
                 ],
-                dtype=torch.float32,
+                dtype=np.float32,
             )
-        return torch.tensor(
+        return np.array(
             [
                 (unit.y - self.height / 2 + 0.5) / 30,
                 (unit.x - self.width / 2 + 0.5) / 30,
@@ -144,7 +143,7 @@ class BattlecodeEnv:
                 unit.move_cd,
                 unit.act_cd,
             ],
-            dtype=torch.float32,
+            dtype=np.float32,
         )
 
     def tile_observations(self, team):
@@ -234,7 +233,7 @@ class BattlecodeEnv:
         return ret
 
     def legal_action_mask(self, unit):
-        ret = np.zeros(unit.action_space.n, dtype=bool)
+        ret = np.zeros(unit.num_actions, dtype=bool)
 
         ret[0] = True
         if not isinstance(unit, Building):
@@ -388,6 +387,7 @@ class BattlecodeEnv:
         unit = unit_class(y=pos[0], x=pos[1], team=team)
         self.units.append(unit)
         self.pos_map[pos] = unit
+        self.unit_counts[unit.__class__][unit.team] += 1
         self.cached_tiles[1 + unit.team, unit.y, unit.x] = np.log1p(unit.curr_hp) / 2
         self.cached_tiles[3 + unit.team, unit.y, unit.x] = (
             1 if isinstance(unit, Building) else 0

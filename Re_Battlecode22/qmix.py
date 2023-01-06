@@ -26,12 +26,12 @@ class MaskedConv(nn.Conv2d):
         ksize = 1 + 2 * math.floor(math.sqrt(unit_cls.vis_rad))
         super().__init__(
             in_channels=7,
-            out_channels=unit_cls.action_space.n,
+            out_channels=unit_cls.num_actions,
             kernel_size=ksize,
             padding="same",
             device=device,
         )
-        mask = torch.ones((unit_cls.action_space.n, 7, ksize, ksize))
+        mask = torch.ones((unit_cls.num_actions, 7, ksize, ksize))
         mid = ksize // 2
         for row in range(ksize):
             for col in range(ksize):
@@ -61,7 +61,7 @@ class QMixAgents(nn.Module):
 
         self.self_nets = nn.ModuleDict(
             {
-                cls.__name__: nn.Linear(11 if cls == Archon else 5, cls.action_space.n)
+                cls.__name__: nn.Linear(11 if cls == Archon else 5, cls.num_actions)
                 for cls in (Miner, Builder, Soldier, Sage, Archon)
             }
         )
@@ -130,15 +130,18 @@ class QMixAgents(nn.Module):
             actions = []
             for unit, action_mask in env.iter_agents():
                 if self.rng.random() < epsilon:
-                    action = self.rng.choice(np.arange(unit.action_space.n)[action_mask])
+                    action = self.rng.choice(np.arange(unit.num_actions)[action_mask])
                 else:
-                    self_preds = self.self_nets[unit.__class__.__name__](torch.tensor(env.self_observation(unit)))
+                    self_preds = self.self_nets[unit.__class__.__name__](
+                        torch.tensor(env.self_observation(unit))
+                    )
                     preds = tile_preds[unit][i, unit.y, unit.x] + self_preds
 
                     if unit.team == 0:
                         preds[~action_mask] = -1e8
                         action = torch.argmax(preds).item()
                     else:
+                        # TODO: this may or may not be incorrect, based on observations
                         preds[~action_mask] = 1e8
                         action = torch.argmin(preds).item()
 

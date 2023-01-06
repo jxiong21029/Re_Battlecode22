@@ -12,7 +12,7 @@ def make_sample_env(num_rounds):
     env.reset()
     for _ in range(num_rounds):
         for unit, action_mask in env.iter_agents():
-            selected_action = random.choice(np.arange(unit.action_space.n)[action_mask])
+            selected_action = random.choice(np.arange(unit.num_actions)[action_mask])
             env.step(unit, selected_action)
     return env
 
@@ -51,7 +51,7 @@ def test_observations(test_envs: list[BattlecodeEnv]):
     for env in test_envs:
         for unit in env.units:
             self_obs = env.self_observation(unit)
-            assert self_obs[0] == (unit.y - env.height / 2 + 1 / 2) / 30
+            assert np.isclose(self_obs[0], (unit.y - env.height / 2 + 1 / 2) / 30)
 
 
 def test_generation(test_envs: list[BattlecodeEnv]):
@@ -92,14 +92,14 @@ def test_action_mask(test_envs: list[BattlecodeEnv]):
             for j, (unit, action_mask) in enumerate(env.iter_agents()):
                 if i == j and not np.all(action_mask):
                     illegal_action = random.choice(
-                        np.arange(unit.action_space.n)[~action_mask]
+                        np.arange(unit.num_actions)[~action_mask]
                     )
                     with pytest.raises(AssertionError):
                         env.step(unit, illegal_action)
                         print(">>>>>", unit, illegal_action)
                 else:
                     legal_action = random.choice(
-                        np.arange(unit.action_space.n)[action_mask]
+                        np.arange(unit.num_actions)[action_mask]
                     )
                     env.step(unit, legal_action)
 
@@ -110,7 +110,7 @@ def test_tile_cache_correctness(test_envs: list[BattlecodeEnv]):
             recomputed = env.recomputed_tiles()
             for i in range(recomputed.shape[0]):
                 assert np.array_equal(recomputed[i], env.cached_tiles[i]), str(i)
-            selected_action = random.choice(np.arange(unit.action_space.n)[action_mask])
+            selected_action = random.choice(np.arange(unit.num_actions)[action_mask])
             env.step(unit, selected_action)
 
 
